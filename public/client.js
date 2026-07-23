@@ -1,0 +1,513 @@
+// ---------- Scene setup ----------
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.outputEncoding = THREE.sRGBEncoding;
+document.body.appendChild(renderer.domElement);
+
+const hemiLight = new THREE.HemisphereLight(0xffffff, 0x444444, 1.0);
+scene.add(hemiLight);
+const sunLight = new THREE.DirectionalLight(0xffffff, 0.8);
+scene.add(sunLight);
+
+const DAY_SKY = new THREE.Color(0x7ec0ee);
+const NIGHT_SKY = new THREE.Color(0x0a0e2a);
+scene.fog = new THREE.Fog(0x7ec0ee, 50, 110);
+
+window.addEventListener('resize', () => {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+});
+
+// ---------- Block materials & global instanced meshes ----------
+const CHUNK_SIZE = World.CHUNK_SIZE;
+const MATERIAL_COLORS = {
+  grass: 0x4caf50, dirt: 0x8b5a2b, stone: 0x888888,
+  wood: 0x5c3d1e, leaves: 0x2e6b2e, planks: 0xd2b48c
+};
+const boxGeo = new THREE.BoxGeometry(1, 1, 1);
+const meshes = {};       // material -> InstancedMesh
+const meshUserData = {}; // material -> { count, capacity, positions: [] }
+
+function createMeshFor(material, capacity) {
+  const mat = new THREE.MeshLambertMaterial({ color: MATERIAL_COLORS[material] });
+  const mesh = new THREE.InstancedMesh(boxGeo, mat, capacity);
+  mesh.count = 0;
+  mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+  scene.add(mesh);
+  meshes[material] = mesh;
+  meshUserData[material] = { count: 0, capacity, positions: new Array(capacity) };
+  return mesh;
+}
+Object.keys(MATERIAL_COLORS).forEach((m) => createMeshFor(m, 2048));
+
+function growCapacity(material) {
+  const old = meshes[material];
+  const oldUd = meshUserData[material];
+  const newCap = oldUd.capacity * 2;
+  const mat = old.material;
+  const mesh = new THREE.InstancedMesh(boxGeo, mat, newCap);
+  mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+  const m4 = new THREE.Matrix4();
+  for (let i = 0; i < oldUd.count; i++) {
+    old.getMatrixAt(i, m4);
+    mesh.setMatrixAt(i, m4);
+  }
+  mesh.count = oldUd.count;
+  scene.remove(old);
+  scene.add(mesh);
+  meshes[material] = mesh;
+  const newUd = { count: oldUd.count, capacity: newCap, positions: oldUd.positions.concat(new Array(newCap - oldUd.capacity)) };
+  meshUserData[material] = newUd;
+}
+
+const blockAt = new Map();       // "x,y,z" -> { material, index, chunkKey }
+const chunkBlockKeys = new Map(); // "cx,cz" -> Set of "x,y,z"
+const columnBlocks = new Map();   // "x,z" -> Set of y
+
+function bkey(x, y, z) { return x + ',' + y + ',' + z; }
+function ckey(x, z) { return x + ',' + z; }
+
+function addBlockInstance(x, y, z, material, chunkKey) {
+  const k = bkey(x, y, z);
+  if (blockAt.has(k)) return;
+  const ud = meshUserData[material];
+  if (ud.count >= ud.capacity) growCapacity(material);
+  const mesh = meshes[material];
+  const udNow = meshUserData[material];
+  const idx = udNow.count;
+  const m4 = new THREE.Matrix4().makeTranslation(x, y, z);
+  mesh.setMatrixAt(idx, m4);
+  udNow.positions[idx] = { x, y, z };
+  udNow.count++;
+  mesh.count = udNow.count;
+  mesh.instanceMatrix.needsUpdate = true;
+  blockAt.set(k, { material, index: idx, chunkKey });
+
+  if (chunkKey) {
+    if (!chunkBlockKeys.has(chunkKey)) chunkBlockKeys.set(chunkKey, new Set());
+    chunkBlockKeys.get(chunkKey).add(k);
+  }
+  const ck = ckey(x, z);
+  if (!columnBlocks.has(ck)) columnBlocks.set(ck, new Set());
+  columnBlocks.get(ck).add(y);
+}
+
+function removeBlockInstance(x, y, z) {
+  const k = bkey(x, y, z);
+  const entry = blockAt.get(k);
+  if (!entry) return null;
+  const mesh = meshes[entry.material];
+  const ud = meshUserData[entry.material];
+  const last = ud.count - 1;
+  if (entry.index !== last) {
+    const m4 = new THREE.Matrix4();
+    mesh.getMatrixAt(last, m4);
+    mesh.setMatrixAt(entry.index, m4);
+    const lastPos = ud.positions[last];
+    ud.positions[entry.index] = lastPos;
+    const lastKey = bkey(lastPos.x, lastPos.y, lastPos.z);
+    const lastEntry = blockAt.get(lastKey);
+    if (lastEntry) { lastEntry.index = entry.index; blockAt.set(lastKey, lastEntry); }
+  }
+  ud.count--;
+  mesh.count = ud.count;
+  mesh.instanceMatrix.needsUpdate = true;
+  blockAt.delete(k);
+  if (entry.chunkKey && chunkBlockKeys.has(entry.chunkKey)) chunkBlockKeys.get(entry.chunkKey).delete(k);
+  const ck = ckey(x, z);
+  const colSet = columnBlocks.get(ck);
+  if (colSet) { colSet.delete(y); if (colSet.size === 0) columnBlocks.delete(ck); }
+  return entry.material;
+}
+
+function groundHeightAt(x, z) {
+  const set = columnBlocks.get(ckey(Math.round(x), Math.round(z)));
+  if (!set || set.size === 0) return -Infinity;
+  return Math.max(...set);
+}
+
+// ---------- Chunk streaming ----------
+const RENDER_DIST = 2;
+const loadedChunks = new Set();
+const requestedChunks = new Set();
+const pendingEdits = new Map(); // chunkKey -> edits (received before we asked, safety)
+
+function loadChunk(cx, cz, columns, edits) {
+  const chunkKey = cx + ',' + cz;
+  if (loadedChunks.has(chunkKey)) return;
+  loadedChunks.add(chunkKey);
+  requestedChunks.delete(chunkKey);
+
+  for (const localKey in columns) {
+    const [lx, lz] = localKey.split(',').map(Number);
+    const wx = cx * CHUNK_SIZE + lx;
+    const wz = cz * CHUNK_SIZE + lz;
+    const { height, tree } = columns[localKey];
+    for (let y = 0; y < height; y++) {
+      let material = 'dirt';
+      if (y === height - 1) material = 'grass';
+      else if (y === 0) material = 'stone';
+      addBlockInstance(wx, y, wz, material, chunkKey);
+    }
+    if (tree) {
+      for (let ty = height; ty < height + 3; ty++) addBlockInstance(wx, ty, wz, 'wood', chunkKey);
+      for (let lxo = -1; lxo <= 1; lxo++) {
+        for (let lzo = -1; lzo <= 1; lzo++) {
+          for (let lyo = 0; lyo <= 1; lyo++) {
+            if (lxo === 0 && lzo === 0 && lyo === 0) continue;
+            addBlockInstance(wx + lxo, height + 3 + lyo, wz + lzo, 'leaves', chunkKey);
+          }
+        }
+      }
+    }
+  }
+
+  // apply persisted edits on top of procedural base
+  for (const localKey in edits) {
+    const [lx, y, lz] = localKey.split(',').map(Number);
+    const wx = cx * CHUNK_SIZE + lx;
+    const wz = cz * CHUNK_SIZE + lz;
+    const edit = edits[localKey];
+    if (edit.action === 'remove') removeBlockInstance(wx, y, wz);
+    else addBlockInstance(wx, y, wz, edit.material, chunkKey);
+  }
+}
+
+function unloadChunk(cx, cz) {
+  const chunkKey = cx + ',' + cz;
+  const keys = chunkBlockKeys.get(chunkKey);
+  if (keys) {
+    for (const k of Array.from(keys)) {
+      const [x, y, z] = k.split(',').map(Number);
+      removeBlockInstance(x, y, z);
+    }
+  }
+  chunkBlockKeys.delete(chunkKey);
+  loadedChunks.delete(chunkKey);
+}
+
+function updateChunks() {
+  const [pcx, pcz] = World.worldToChunk(camera.position.x, camera.position.z);
+  const wanted = new Set();
+  for (let dx = -RENDER_DIST; dx <= RENDER_DIST; dx++) {
+    for (let dz = -RENDER_DIST; dz <= RENDER_DIST; dz++) {
+      const cx = pcx + dx, cz = pcz + dz;
+      const key = cx + ',' + cz;
+      wanted.add(key);
+      if (!loadedChunks.has(key) && !requestedChunks.has(key)) {
+        requestedChunks.add(key);
+        socket.emit('requestChunk', { cx, cz });
+      }
+    }
+  }
+  for (const key of Array.from(loadedChunks)) {
+    if (!wanted.has(key)) {
+      const [cx, cz] = key.split(',').map(Number);
+      unloadChunk(cx, cz);
+    }
+  }
+}
+
+// ---------- Networking ----------
+const socket = io();
+let selfId = null;
+let dayLength = 240000;
+const remotePlayers = new Map(); // id -> { mesh, target }
+const remoteMobs = new Map();    // id -> { mesh, target }
+let dayClock = 0;
+let myHealth = 20, myHunger = 20;
+
+function makePlayerMesh(color) {
+  const group = new THREE.Group();
+  const body = new THREE.Mesh(new THREE.CylinderGeometry(0.3, 0.3, 1.2, 8), new THREE.MeshLambertMaterial({ color }));
+  body.position.y = 0.6;
+  const head = new THREE.Mesh(new THREE.SphereGeometry(0.3, 8, 8), new THREE.MeshLambertMaterial({ color }));
+  head.position.y = 1.5;
+  group.add(body, head);
+  scene.add(group);
+  return group;
+}
+
+function makeMobMesh() {
+  const group = new THREE.Group();
+  const body = new THREE.Mesh(new THREE.BoxGeometry(0.7, 1.2, 0.5), new THREE.MeshLambertMaterial({ color: 0x2f5c2f }));
+  body.position.y = 0.6;
+  const head = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.5, 0.5), new THREE.MeshLambertMaterial({ color: 0x3a703a }));
+  head.position.y = 1.45;
+  group.add(body, head);
+  scene.add(group);
+  return group;
+}
+
+function addRemotePlayer(id, p) {
+  const mesh = makePlayerMesh(p.color);
+  mesh.position.set(p.x, p.y, p.z);
+  remotePlayers.set(id, { mesh, target: { x: p.x, y: p.y, z: p.z, ry: p.ry || 0 } });
+}
+function removeRemotePlayer(id) {
+  const rp = remotePlayers.get(id);
+  if (rp) scene.remove(rp.mesh);
+  remotePlayers.delete(id);
+}
+const remoteMobsByGroup = new WeakSet();
+function addRemoteMob(id, m) {
+  const mesh = makeMobMesh();
+  mesh.position.set(m.x, m.y, m.z);
+  mesh.userData.mobId = id;
+  remoteMobsByGroup.add(mesh);
+  remoteMobs.set(id, { mesh, target: { x: m.x, y: m.y, z: m.z } });
+}
+function removeRemoteMob(id) {
+  const rm = remoteMobs.get(id);
+  if (rm) scene.remove(rm.mesh);
+  remoteMobs.delete(id);
+}
+
+const playersOnlineEl = document.getElementById('players-online');
+
+socket.on('init', (data) => {
+  selfId = data.selfId;
+  dayLength = data.dayLength;
+  const spawn = data.players[selfId];
+  if (spawn) camera.position.set(spawn.x, spawn.y, spawn.z);
+  for (const [id, p] of Object.entries(data.players)) if (id !== selfId) addRemotePlayer(id, p);
+  for (const [id, m] of Object.entries(data.mobs)) addRemoteMob(id, m);
+  playersOnlineEl.textContent = 'Players online: ' + (Object.keys(data.players).length);
+});
+socket.on('playerJoined', (p) => {
+  if (p.id !== selfId) addRemotePlayer(p.id, p);
+  playersOnlineEl.textContent = 'Players online: ' + (remotePlayers.size + 1);
+});
+socket.on('playerLeft', ({ id }) => {
+  removeRemotePlayer(id);
+  playersOnlineEl.textContent = 'Players online: ' + (remotePlayers.size + 1);
+});
+socket.on('chunkData', ({ cx, cz, columns, edits }) => loadChunk(cx, cz, columns, edits));
+socket.on('blockEdit', ({ x, y, z, action, material }) => {
+  const [cx, cz] = World.worldToChunk(x, z);
+  const chunkKey = cx + ',' + cz;
+  if (!loadedChunks.has(chunkKey)) return;
+  if (action === 'remove') removeBlockInstance(x, y, z);
+  else addBlockInstance(x, y, z, material, chunkKey);
+});
+socket.on('respawn', ({ x, y, z }) => {
+  camera.position.set(x, y, z);
+  velocityY = 0;
+});
+socket.on('tick', (data) => {
+  for (const [id, p] of Object.entries(data.players)) {
+    if (id === selfId) { myHealth = p.health; myHunger = p.hunger; continue; }
+    let rp = remotePlayers.get(id);
+    if (!rp) { addRemotePlayer(id, p); rp = remotePlayers.get(id); }
+    rp.target = { x: p.x, y: p.y, z: p.z, ry: p.ry };
+  }
+  const activeMobIds = new Set(Object.keys(data.mobs));
+  for (const [id, m] of Object.entries(data.mobs)) {
+    let rm = remoteMobs.get(id);
+    if (!rm) { addRemoteMob(id, m); rm = remoteMobs.get(id); }
+    rm.target = { x: m.x, y: m.y, z: m.z };
+  }
+  for (const id of Array.from(remoteMobs.keys())) if (!activeMobIds.has(id)) removeRemoteMob(id);
+  dayClock = data.dayClock;
+});
+
+// ---------- Player controls ----------
+const controls = new THREE.PointerLockControls(camera, document.body);
+const instructions = document.getElementById('instructions');
+instructions.addEventListener('click', () => controls.lock());
+controls.addEventListener('lock', () => instructions.style.display = 'none');
+controls.addEventListener('unlock', () => instructions.style.display = 'flex');
+
+const move = { forward: false, back: false, left: false, right: false };
+let velocityY = 0;
+let onGround = false;
+const GRAVITY = -20;
+const JUMP_SPEED = 8;
+const MOVE_SPEED = 6;
+
+// ---------- Inventory & hotbar ----------
+const HOTBAR_ORDER = ['dirt', 'stone', 'grass', 'wood', 'leaves', 'planks'];
+const inventory = { grass: 0, dirt: 10, stone: 5, wood: 0, leaves: 0, planks: 0 };
+let selectedMaterial = 'dirt';
+const hotbarEl = document.getElementById('hotbar');
+
+function renderHotbar() {
+  hotbarEl.innerHTML = '';
+  HOTBAR_ORDER.forEach((material, i) => {
+    const slot = document.createElement('div');
+    slot.className = 'slot' + (material === selectedMaterial ? ' active' : '');
+    slot.innerHTML = `<span class="key">${i + 1}</span><span class="count">${inventory[material]}</span>
+      <span class="swatch" style="background:#${MATERIAL_COLORS[material].toString(16).padStart(6, '0')}"></span>`;
+    hotbarEl.appendChild(slot);
+  });
+}
+renderHotbar();
+
+document.addEventListener('keydown', (e) => {
+  switch (e.code) {
+    case 'KeyW': move.forward = true; break;
+    case 'KeyS': move.back = true; break;
+    case 'KeyA': move.left = true; break;
+    case 'KeyD': move.right = true; break;
+    case 'Space': if (onGround) { velocityY = JUMP_SPEED; onGround = false; } break;
+    case 'Digit1': case 'Digit2': case 'Digit3': case 'Digit4': case 'Digit5': case 'Digit6': {
+      const idx = Number(e.code.slice(5)) - 1;
+      if (HOTBAR_ORDER[idx]) { selectedMaterial = HOTBAR_ORDER[idx]; renderHotbar(); }
+      break;
+    }
+    case 'KeyC':
+      if (inventory.wood >= 1) {
+        inventory.wood -= 1;
+        inventory.planks += 4;
+        renderHotbar();
+      }
+      break;
+  }
+});
+document.addEventListener('keyup', (e) => {
+  switch (e.code) {
+    case 'KeyW': move.forward = false; break;
+    case 'KeyS': move.back = false; break;
+    case 'KeyA': move.left = false; break;
+    case 'KeyD': move.right = false; break;
+  }
+});
+
+// ---------- Breaking / placing / attacking ----------
+const raycaster = new THREE.Raycaster();
+raycaster.far = 8;
+const centerVec = new THREE.Vector2(0, 0);
+document.addEventListener('contextmenu', (e) => e.preventDefault());
+
+document.addEventListener('mousedown', (e) => {
+  if (!controls.isLocked) return;
+  raycaster.setFromCamera(centerVec, camera);
+
+  if (e.button === 0) {
+    const mobMeshes = Array.from(remoteMobsAll()).map((m) => m.mesh);
+    const mobHits = raycaster.intersectObjects(mobMeshes, true);
+    if (mobHits.length > 0) {
+      const hitGroup = findMobGroup(mobHits[0].object);
+      const mobId = hitGroup && hitGroup.userData.mobId;
+      if (mobId) { socket.emit('attackMob', { mobId }); return; }
+    }
+  }
+
+  const hits = raycaster.intersectObjects(Object.values(meshes));
+  if (hits.length === 0) return;
+  const hit = hits[0];
+  const material = meshOwner(hit.object);
+  const pos = meshUserData[material].positions[hit.instanceId];
+  if (!pos) return;
+
+  if (e.button === 0) {
+    removeBlockInstance(pos.x, pos.y, pos.z);
+    inventory[material] = (inventory[material] || 0) + 1;
+    renderHotbar();
+    socket.emit('blockEdit', { x: pos.x, y: pos.y, z: pos.z, action: 'remove' });
+  } else if (e.button === 2) {
+    if (inventory[selectedMaterial] <= 0) return;
+    const n = hit.face.normal;
+    const nx = Math.round(pos.x + n.x), ny = Math.round(pos.y + n.y), nz = Math.round(pos.z + n.z);
+    if (blockAt.has(bkey(nx, ny, nz))) return;
+    const [cx, cz] = World.worldToChunk(nx, nz);
+    inventory[selectedMaterial] -= 1;
+    renderHotbar();
+    addBlockInstance(nx, ny, nz, selectedMaterial, cx + ',' + cz);
+    socket.emit('blockEdit', { x: nx, y: ny, z: nz, action: 'add', material: selectedMaterial });
+  }
+});
+
+function meshOwner(object) {
+  for (const material in meshes) if (meshes[material] === object) return material;
+  return null;
+}
+function remoteMobsAll() { return remoteMobs.values(); }
+function findMobGroup(object) {
+  let o = object;
+  while (o) { if (remoteMobsByGroup.has(o)) return o; o = o.parent; }
+  return null;
+}
+
+// ---------- Animation loop ----------
+const clock = new THREE.Clock();
+
+function animate() {
+  requestAnimationFrame(animate);
+  const dt = Math.min(clock.getDelta(), 0.1);
+
+  if (controls.isLocked) {
+    const dir = new THREE.Vector3();
+    camera.getWorldDirection(dir);
+    dir.y = 0; dir.normalize();
+    const right = new THREE.Vector3().crossVectors(dir, camera.up).normalize();
+
+    const step = new THREE.Vector3();
+    if (move.forward) step.add(dir);
+    if (move.back) step.sub(dir);
+    if (move.right) step.add(right);
+    if (move.left) step.sub(right);
+    if (step.lengthSq() > 0) step.normalize().multiplyScalar(MOVE_SPEED * dt);
+
+    camera.position.x += step.x;
+    camera.position.z += step.z;
+
+    velocityY += GRAVITY * dt;
+    camera.position.y += velocityY * dt;
+
+    const ground = groundHeightAt(camera.position.x, camera.position.z);
+    const feetLevel = (ground === -Infinity ? 0 : ground) + 1 + 0.8;
+    if (camera.position.y <= feetLevel) {
+      camera.position.y = feetLevel;
+      velocityY = 0;
+      onGround = true;
+    } else {
+      onGround = false;
+    }
+  }
+  updateChunks();
+
+  for (const [, rp] of remotePlayers) {
+    rp.mesh.position.lerp(new THREE.Vector3(rp.target.x, rp.target.y - 0.9, rp.target.z), 0.25);
+    rp.mesh.rotation.y = rp.target.ry;
+  }
+  for (const [, rm] of remoteMobs) {
+    rm.mesh.position.lerp(new THREE.Vector3(rm.target.x, rm.target.y - 0.9, rm.target.z), 0.25);
+  }
+
+  // day/night visuals
+  const fade = 0.05;
+  let brightness;
+  if (dayClock < 0.5 - fade) brightness = 1;
+  else if (dayClock < 0.5 + fade) brightness = 1 - (dayClock - (0.5 - fade)) / (2 * fade);
+  else if (dayClock < 0.95 - fade) brightness = 0;
+  else if (dayClock < 0.95 + fade) brightness = (dayClock - (0.95 - fade)) / (2 * fade);
+  else brightness = 1;
+
+  const sky = DAY_SKY.clone().lerp(NIGHT_SKY, 1 - brightness);
+  scene.background = sky;
+  scene.fog.color = sky;
+  sunLight.intensity = 0.2 + 0.8 * brightness;
+  hemiLight.intensity = 0.3 + 0.7 * brightness;
+  const angle = dayClock * Math.PI * 2;
+  sunLight.position.set(Math.cos(angle) * 100, Math.sin(angle) * 80 + 10, 40);
+
+  document.getElementById('health-fill').style.width = Math.max(0, (myHealth / 20) * 100) + '%';
+  document.getElementById('hunger-fill').style.width = Math.max(0, (myHunger / 20) * 100) + '%';
+  document.getElementById('dead-banner').style.display = myHealth <= 0 ? 'flex' : 'none';
+
+  renderer.render(scene, camera);
+}
+
+// periodic position broadcast
+setInterval(() => {
+  if (!controls.isLocked) return;
+  socket.emit('move', {
+    x: camera.position.x, y: camera.position.y, z: camera.position.z, ry: camera.rotation.y
+  });
+}, 100);
+
+animate();
