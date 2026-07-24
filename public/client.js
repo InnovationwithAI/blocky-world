@@ -140,10 +140,18 @@ function removeBlockInstance(x, y, z) {
   return entry.material;
 }
 
-function groundHeightAt(x, z) {
+// Highest block at-or-below (current feet height + step-up allowance).
+// Ignores floating blocks (e.g. a tree canopy's leaves) that sit far above
+// the player - otherwise walking under/near a tree "ground-snaps" onto it.
+function groundHeightBelow(x, z, feetY) {
   const set = columnBlocks.get(ckey(Math.round(x), Math.round(z)));
   if (!set || set.size === 0) return -Infinity;
-  return Math.max(...set);
+  const maxY = feetY + 1.1;
+  let best = -Infinity;
+  for (const y of set) {
+    if (y <= maxY && y > best) best = y;
+  }
+  return best;
 }
 
 // ---------- Chunk streaming ----------
@@ -330,18 +338,29 @@ socket.on('tick', (data) => {
 });
 
 // ---------- Player controls ----------
+// Mouse-look (via Pointer Lock) is optional - arrow keys always work as a
+// keyboard-only alternative, since not every player has a mouse.
+camera.rotation.order = 'YXZ';
 const controls = new THREE.PointerLockControls(camera, document.body);
 const instructions = document.getElementById('instructions');
-instructions.addEventListener('click', () => controls.lock());
-controls.addEventListener('lock', () => instructions.style.display = 'none');
-controls.addEventListener('unlock', () => instructions.style.display = 'flex');
+let gameStarted = false;
+function startGame() {
+  if (gameStarted) return;
+  gameStarted = true;
+  instructions.style.display = 'none';
+  try { controls.lock(); } catch (e) { /* no mouse available - keyboard controls still work */ }
+}
+instructions.addEventListener('click', startGame);
+controls.addEventListener('unlock', () => { instructions.style.display = 'flex'; gameStarted = false; });
 
 const move = { forward: false, back: false, left: false, right: false };
+const look = { left: false, right: false, up: false, down: false };
 let velocityY = 0;
 let onGround = false;
 const GRAVITY = -20;
 const JUMP_SPEED = 8;
 const MOVE_SPEED = 6;
+const TURN_SPEED = 2.4; // radians/sec for keyboard look
 
 // ---------- Collision (AABB player vs voxel grid) ----------
 const EYE_HEIGHT = 1.3;   // eye above feet
@@ -394,12 +413,20 @@ function renderHotbar() {
 }
 renderHotbar();
 
+const STARTER_KEYS = new Set(['KeyW', 'KeyA', 'KeyS', 'KeyD', 'Space', 'Enter',
+  'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight']);
+
 document.addEventListener('keydown', (e) => {
+  if (!gameStarted && STARTER_KEYS.has(e.code)) startGame();
   switch (e.code) {
     case 'KeyW': move.forward = true; break;
     case 'KeyS': move.back = true; break;
     case 'KeyA': move.left = true; break;
     case 'KeyD': move.right = true; break;
+    case 'ArrowLeft': look.left = true; break;
+    case 'ArrowRight': look.right = true; break;
+    case 'ArrowUp': look.up = true; break;
+    case 'ArrowDown': look.down = true; break;
     case 'Space': if (onGround) { velocityY = JUMP_SPEED; onGround = false; } break;
     case 'Digit1': case 'Digit2': case 'Digit3': case 'Digit4': case 'Digit5': case 'Digit6': {
       const idx = Number(e.code.slice(5)) - 1;
@@ -420,6 +447,8 @@ document.addEventListener('keydown', (e) => {
         document.getElementById('apple-count').textContent = 'Apples: ' + inventory.apple + ' (press F to eat)';
       }
       break;
+    case 'KeyJ': if (gameStarted) breakOrAttack(); break;
+    case 'KeyK': if (gameStarted) placeBlock(); break;
   }
 });
 document.addEventListener('keyup', (e) => {
@@ -428,6 +457,10 @@ document.addEventListener('keyup', (e) => {
     case 'KeyS': move.back = false; break;
     case 'KeyA': move.left = false; break;
     case 'KeyD': move.right = false; break;
+    case 'ArrowLeft': look.left = false; break;
+    case 'ArrowRight': look.right = false; break;
+    case 'ArrowUp': look.up = false; break;
+    case 'ArrowDown': look.down = false; break;
   }
 });
 
@@ -437,18 +470,15 @@ raycaster.far = 8;
 const centerVec = new THREE.Vector2(0, 0);
 document.addEventListener('contextmenu', (e) => e.preventDefault());
 
-document.addEventListener('mousedown', (e) => {
-  if (!controls.isLocked) return;
+function breakOrAttack() {
   raycaster.setFromCamera(centerVec, camera);
 
-  if (e.button === 0) {
-    const mobMeshes = Array.from(remoteMobsAll()).map((m) => m.mesh);
-    const mobHits = raycaster.intersectObjects(mobMeshes, true);
-    if (mobHits.length > 0) {
-      const hitGroup = findMobGroup(mobHits[0].object);
-      const mobId = hitGroup && hitGroup.userData.mobId;
-      if (mobId) { socket.emit('attackMob', { mobId }); return; }
-    }
+  const mobMeshes = Array.from(remoteMobsAll()).map((m) => m.mesh);
+  const mobHits = raycaster.intersectObjects(mobMeshes, true);
+  if (mobHits.length > 0) {
+    const hitGroup = findMobGroup(mobHits[0].object);
+    const mobId = hitGroup && hitGroup.userData.mobId;
+    if (mobId) { socket.emit('attackMob', { mobId }); return; }
   }
 
   const hits = raycaster.intersectObjects(Object.values(meshes));
@@ -456,30 +486,42 @@ document.addEventListener('mousedown', (e) => {
   const hit = hits[0];
   const material = meshOwner(hit.object);
   const pos = meshUserData[material].positions[hit.instanceId];
-  if (!pos) return;
+  if (!pos || UNBREAKABLE.has(material)) return;
 
-  if (e.button === 0) {
-    if (UNBREAKABLE.has(material)) return;
-    removeBlockInstance(pos.x, pos.y, pos.z);
-    inventory[material] = (inventory[material] || 0) + 1;
-    if (material === 'leaves' && Math.random() < 0.25) {
-      inventory.apple = (inventory.apple || 0) + 1;
-      document.getElementById('apple-count').textContent = 'Apples: ' + inventory.apple + ' (press F to eat)';
-    }
-    renderHotbar();
-    socket.emit('blockEdit', { x: pos.x, y: pos.y, z: pos.z, action: 'remove' });
-  } else if (e.button === 2) {
-    if (inventory[selectedMaterial] <= 0) return;
-    const n = hit.face.normal;
-    const nx = Math.round(pos.x + n.x), ny = Math.round(pos.y + n.y), nz = Math.round(pos.z + n.z);
-    if (blockAt.has(bkey(nx, ny, nz))) return;
-    if (blockOverlapsPlayer(nx, ny, nz)) return;
-    const [cx, cz] = World.worldToChunk(nx, nz);
-    inventory[selectedMaterial] -= 1;
-    renderHotbar();
-    addBlockInstance(nx, ny, nz, selectedMaterial, cx + ',' + cz);
-    socket.emit('blockEdit', { x: nx, y: ny, z: nz, action: 'add', material: selectedMaterial });
+  removeBlockInstance(pos.x, pos.y, pos.z);
+  inventory[material] = (inventory[material] || 0) + 1;
+  if (material === 'leaves' && Math.random() < 0.25) {
+    inventory.apple = (inventory.apple || 0) + 1;
+    document.getElementById('apple-count').textContent = 'Apples: ' + inventory.apple + ' (press F to eat)';
   }
+  renderHotbar();
+  socket.emit('blockEdit', { x: pos.x, y: pos.y, z: pos.z, action: 'remove' });
+}
+
+function placeBlock() {
+  raycaster.setFromCamera(centerVec, camera);
+  const hits = raycaster.intersectObjects(Object.values(meshes));
+  if (hits.length === 0) return;
+  const hit = hits[0];
+  const material = meshOwner(hit.object);
+  const pos = meshUserData[material].positions[hit.instanceId];
+  if (!pos) return;
+  if (inventory[selectedMaterial] <= 0) return;
+  const n = hit.face.normal;
+  const nx = Math.round(pos.x + n.x), ny = Math.round(pos.y + n.y), nz = Math.round(pos.z + n.z);
+  if (blockAt.has(bkey(nx, ny, nz))) return;
+  if (blockOverlapsPlayer(nx, ny, nz)) return;
+  const [cx, cz] = World.worldToChunk(nx, nz);
+  inventory[selectedMaterial] -= 1;
+  renderHotbar();
+  addBlockInstance(nx, ny, nz, selectedMaterial, cx + ',' + cz);
+  socket.emit('blockEdit', { x: nx, y: ny, z: nz, action: 'add', material: selectedMaterial });
+}
+
+document.addEventListener('mousedown', (e) => {
+  if (!gameStarted) return;
+  if (e.button === 0) breakOrAttack();
+  else if (e.button === 2) placeBlock();
 });
 
 function meshOwner(object) {
@@ -500,7 +542,12 @@ function animate() {
   requestAnimationFrame(animate);
   const dt = Math.min(clock.getDelta(), 0.1);
 
-  if (controls.isLocked) {
+  if (look.left) camera.rotation.y += TURN_SPEED * dt;
+  if (look.right) camera.rotation.y -= TURN_SPEED * dt;
+  if (look.up) camera.rotation.x = Math.min(Math.PI / 2 - 0.05, camera.rotation.x + TURN_SPEED * 0.8 * dt);
+  if (look.down) camera.rotation.x = Math.max(-(Math.PI / 2 - 0.05), camera.rotation.x - TURN_SPEED * 0.8 * dt);
+
+  if (gameStarted) {
     const dir = new THREE.Vector3();
     camera.getWorldDirection(dir);
     dir.y = 0; dir.normalize();
@@ -520,9 +567,10 @@ function animate() {
 
     velocityY += GRAVITY * dt;
     const tryY = camera.position.y + velocityY * dt;
+    const feetY = camera.position.y - EYE_HEIGHT;
 
     if (velocityY <= 0) {
-      const ground = groundHeightAt(camera.position.x, camera.position.z);
+      const ground = groundHeightBelow(camera.position.x, camera.position.z, feetY);
       const feetLevel = (ground === -Infinity ? World.BEDROCK_Y - 1 : ground) + 0.5 + EYE_HEIGHT;
       if (tryY <= feetLevel) {
         camera.position.y = feetLevel;
