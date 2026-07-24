@@ -4,12 +4,24 @@ const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerH
 const renderer = new THREE.WebGLRenderer({ antialias: true });
 renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.outputEncoding = THREE.sRGBEncoding;
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 document.body.appendChild(renderer.domElement);
 
-const hemiLight = new THREE.HemisphereLight(0xffffff, 0x444444, 1.0);
+const hemiLight = new THREE.HemisphereLight(0xbfe3ff, 0x3a2f28, 1.0);
 scene.add(hemiLight);
-const sunLight = new THREE.DirectionalLight(0xffffff, 0.8);
+const sunLight = new THREE.DirectionalLight(0xfff1d6, 1.0);
+sunLight.castShadow = true;
+sunLight.shadow.mapSize.set(1536, 1536);
+sunLight.shadow.camera.near = 1;
+sunLight.shadow.camera.far = 150;
+sunLight.shadow.camera.left = -40;
+sunLight.shadow.camera.right = 40;
+sunLight.shadow.camera.top = 40;
+sunLight.shadow.camera.bottom = -40;
+sunLight.shadow.bias = -0.0015;
 scene.add(sunLight);
+scene.add(sunLight.target);
 
 const DAY_SKY = new THREE.Color(0x7ec0ee);
 const NIGHT_SKY = new THREE.Color(0x0a0e2a);
@@ -25,8 +37,9 @@ window.addEventListener('resize', () => {
 const CHUNK_SIZE = World.CHUNK_SIZE;
 const MATERIAL_COLORS = {
   grass: 0x4caf50, dirt: 0x8b5a2b, stone: 0x888888,
-  wood: 0x5c3d1e, leaves: 0x2e6b2e, planks: 0xd2b48c
+  wood: 0x5c3d1e, leaves: 0x2e6b2e, planks: 0xd2b48c, bedrock: 0x2b2b2e
 };
+const UNBREAKABLE = new Set(['bedrock']);
 const boxGeo = new THREE.BoxGeometry(1, 1, 1);
 const meshes = {};       // material -> InstancedMesh
 const meshUserData = {}; // material -> { count, capacity, positions: [] }
@@ -35,6 +48,8 @@ function createMeshFor(material, capacity) {
   const mat = new THREE.MeshLambertMaterial({ color: MATERIAL_COLORS[material] });
   const mesh = new THREE.InstancedMesh(boxGeo, mat, capacity);
   mesh.count = 0;
+  mesh.castShadow = true;
+  mesh.receiveShadow = true;
   mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
   scene.add(mesh);
   meshes[material] = mesh;
@@ -49,6 +64,8 @@ function growCapacity(material) {
   const newCap = oldUd.capacity * 2;
   const mat = old.material;
   const mesh = new THREE.InstancedMesh(boxGeo, mat, newCap);
+  mesh.castShadow = true;
+  mesh.receiveShadow = true;
   mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
   const m4 = new THREE.Matrix4();
   for (let i = 0; i < oldUd.count; i++) {
@@ -146,11 +163,8 @@ function loadChunk(cx, cz, columns, edits) {
     const wx = cx * CHUNK_SIZE + lx;
     const wz = cz * CHUNK_SIZE + lz;
     const { height, tree } = columns[localKey];
-    for (let y = 0; y < height; y++) {
-      let material = 'dirt';
-      if (y === height - 1) material = 'grass';
-      else if (y === 0) material = 'stone';
-      addBlockInstance(wx, y, wz, material, chunkKey);
+    for (let y = World.BEDROCK_Y; y < height; y++) {
+      addBlockInstance(wx, y, wz, World.materialAt(y, height), chunkKey);
     }
     if (tree) {
       for (let ty = height; ty < height + 3; ty++) addBlockInstance(wx, ty, wz, 'wood', chunkKey);
@@ -226,6 +240,7 @@ function makePlayerMesh(color) {
   body.position.y = 0.6;
   const head = new THREE.Mesh(new THREE.SphereGeometry(0.3, 8, 8), new THREE.MeshLambertMaterial({ color }));
   head.position.y = 1.5;
+  body.castShadow = head.castShadow = true;
   group.add(body, head);
   scene.add(group);
   return group;
@@ -328,9 +343,42 @@ const GRAVITY = -20;
 const JUMP_SPEED = 8;
 const MOVE_SPEED = 6;
 
+// ---------- Collision (AABB player vs voxel grid) ----------
+const EYE_HEIGHT = 1.3;   // eye above feet
+const PLAYER_HEIGHT = 1.7; // total body height
+const PLAYER_RADIUS = 0.3;
+
+function isSolidBlock(x, y, z) {
+  return blockAt.has(bkey(Math.round(x), Math.round(y), Math.round(z)));
+}
+
+// Can the player's body occupy this eye position without overlapping a solid block?
+function canStandAt(ex, ey, ez) {
+  const feetY = ey - EYE_HEIGHT;
+  const sampleYs = [feetY + 0.15, feetY + PLAYER_HEIGHT - 0.15];
+  const offsets = [-PLAYER_RADIUS, PLAYER_RADIUS];
+  for (const sy of sampleYs) {
+    for (const ox of offsets) {
+      for (const oz of offsets) {
+        if (isSolidBlock(ex + ox, sy, ez + oz)) return false;
+      }
+    }
+  }
+  return true;
+}
+
+function blockOverlapsPlayer(bx, by, bz) {
+  const feetY = camera.position.y - EYE_HEIGHT;
+  const headY = feetY + PLAYER_HEIGHT;
+  const withinY = (by + 0.5) > feetY && (by - 0.5) < headY;
+  const withinXZ = Math.abs(bx - camera.position.x) < (PLAYER_RADIUS + 0.5) &&
+                    Math.abs(bz - camera.position.z) < (PLAYER_RADIUS + 0.5);
+  return withinY && withinXZ;
+}
+
 // ---------- Inventory & hotbar ----------
 const HOTBAR_ORDER = ['dirt', 'stone', 'grass', 'wood', 'leaves', 'planks'];
-const inventory = { grass: 0, dirt: 10, stone: 5, wood: 0, leaves: 0, planks: 0 };
+const inventory = { grass: 0, dirt: 10, stone: 5, wood: 0, leaves: 0, planks: 0, apple: 2 };
 let selectedMaterial = 'dirt';
 const hotbarEl = document.getElementById('hotbar');
 
@@ -363,6 +411,13 @@ document.addEventListener('keydown', (e) => {
         inventory.wood -= 1;
         inventory.planks += 4;
         renderHotbar();
+      }
+      break;
+    case 'KeyF':
+      if (inventory.apple >= 1) {
+        inventory.apple -= 1;
+        socket.emit('eat');
+        document.getElementById('apple-count').textContent = 'Apples: ' + inventory.apple + ' (press F to eat)';
       }
       break;
   }
@@ -404,8 +459,13 @@ document.addEventListener('mousedown', (e) => {
   if (!pos) return;
 
   if (e.button === 0) {
+    if (UNBREAKABLE.has(material)) return;
     removeBlockInstance(pos.x, pos.y, pos.z);
     inventory[material] = (inventory[material] || 0) + 1;
+    if (material === 'leaves' && Math.random() < 0.25) {
+      inventory.apple = (inventory.apple || 0) + 1;
+      document.getElementById('apple-count').textContent = 'Apples: ' + inventory.apple + ' (press F to eat)';
+    }
     renderHotbar();
     socket.emit('blockEdit', { x: pos.x, y: pos.y, z: pos.z, action: 'remove' });
   } else if (e.button === 2) {
@@ -413,6 +473,7 @@ document.addEventListener('mousedown', (e) => {
     const n = hit.face.normal;
     const nx = Math.round(pos.x + n.x), ny = Math.round(pos.y + n.y), nz = Math.round(pos.z + n.z);
     if (blockAt.has(bkey(nx, ny, nz))) return;
+    if (blockOverlapsPlayer(nx, ny, nz)) return;
     const [cx, cz] = World.worldToChunk(nx, nz);
     inventory[selectedMaterial] -= 1;
     renderHotbar();
@@ -452,19 +513,31 @@ function animate() {
     if (move.left) step.sub(right);
     if (step.lengthSq() > 0) step.normalize().multiplyScalar(MOVE_SPEED * dt);
 
-    camera.position.x += step.x;
-    camera.position.z += step.z;
+    const tryX = camera.position.x + step.x;
+    if (canStandAt(tryX, camera.position.y, camera.position.z)) camera.position.x = tryX;
+    const tryZ = camera.position.z + step.z;
+    if (canStandAt(camera.position.x, camera.position.y, tryZ)) camera.position.z = tryZ;
 
     velocityY += GRAVITY * dt;
-    camera.position.y += velocityY * dt;
+    const tryY = camera.position.y + velocityY * dt;
 
-    const ground = groundHeightAt(camera.position.x, camera.position.z);
-    const feetLevel = (ground === -Infinity ? 0 : ground) + 1 + 0.8;
-    if (camera.position.y <= feetLevel) {
-      camera.position.y = feetLevel;
-      velocityY = 0;
-      onGround = true;
+    if (velocityY <= 0) {
+      const ground = groundHeightAt(camera.position.x, camera.position.z);
+      const feetLevel = (ground === -Infinity ? World.BEDROCK_Y - 1 : ground) + 0.5 + EYE_HEIGHT;
+      if (tryY <= feetLevel) {
+        camera.position.y = feetLevel;
+        velocityY = 0;
+        onGround = true;
+      } else {
+        camera.position.y = tryY;
+        onGround = false;
+      }
     } else {
+      if (canStandAt(camera.position.x, tryY, camera.position.z)) {
+        camera.position.y = tryY;
+      } else {
+        velocityY = 0;
+      }
       onGround = false;
     }
   }
@@ -490,10 +563,16 @@ function animate() {
   const sky = DAY_SKY.clone().lerp(NIGHT_SKY, 1 - brightness);
   scene.background = sky;
   scene.fog.color = sky;
-  sunLight.intensity = 0.2 + 0.8 * brightness;
-  hemiLight.intensity = 0.3 + 0.7 * brightness;
+  sunLight.intensity = 0.25 + 0.95 * brightness;
+  hemiLight.intensity = 0.35 + 0.75 * brightness;
   const angle = dayClock * Math.PI * 2;
-  sunLight.position.set(Math.cos(angle) * 100, Math.sin(angle) * 80 + 10, 40);
+  sunLight.position.set(
+    camera.position.x + Math.cos(angle) * 60,
+    Math.sin(angle) * 60 + 30,
+    camera.position.z + 30
+  );
+  sunLight.target.position.copy(camera.position);
+  sunLight.target.updateMatrixWorld();
 
   document.getElementById('health-fill').style.width = Math.max(0, (myHealth / 20) * 100) + '%';
   document.getElementById('hunger-fill').style.width = Math.max(0, (myHunger / 20) * 100) + '%';

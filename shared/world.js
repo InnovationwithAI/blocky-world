@@ -9,6 +9,8 @@
 
   const CHUNK_SIZE = 16;
   const SEED = 1337;
+  const BEDROCK_Y = -12;
+  const DIRT_DEPTH = 3;
 
   function hash(x, z) {
     let n = Math.sin(x * 127.1 + z * 311.7 + SEED * 0.017) * 43758.5453123;
@@ -63,5 +65,13 @@
     return [Math.floor(wx / CHUNK_SIZE), Math.floor(wz / CHUNK_SIZE)];
   }
 
-  return { CHUNK_SIZE, heightAt, treeAt, generateChunkColumns, worldToChunk, hash };
+  // Material for a given y within a column whose surface is at `height`.
+  function materialAt(y, height) {
+    if (y === BEDROCK_Y) return 'bedrock';
+    if (y === height - 1) return 'grass';
+    if (y >= height - 1 - DIRT_DEPTH) return 'dirt';
+    return 'stone';
+  }
+
+  return { CHUNK_SIZE, BEDROCK_Y, DIRT_DEPTH, heightAt, treeAt, materialAt, generateChunkColumns, worldToChunk, hash };
 });

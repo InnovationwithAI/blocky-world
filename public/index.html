@@ -16,6 +16,7 @@
     background: rgba(0,0,0,0.6); color: white; text-align: center; cursor: pointer; z-index: 20;
   }
   #instructions div { max-width: 500px; }
+  #apple-count { margin-top: 4px; opacity: 0.85; }
   #hint {
     position: fixed; bottom: 84px; left: 10px; color: white; font-size: 13px;
     background: rgba(0,0,0,0.4); padding: 6px 10px; border-radius: 6px; pointer-events: none;
@@ -54,12 +55,13 @@
 </head>
 <body>
 <div id="crosshair"></div>
-<div id="hint">WASD move &middot; Mouse look &middot; Space jump &middot; Left-click break/attack &middot; Right-click place &middot; 1-6 select block &middot; C craft planks</div>
+<div id="hint">WASD move &middot; Mouse look &middot; Space jump &middot; Left-click break/attack &middot; Right-click place &middot; 1-6 select block &middot; C craft planks &middot; F eat apple</div>
 <div id="stats">
   <div class="bar-label"><span>Health</span></div>
   <div class="bar-track"><div class="bar-fill" id="health-fill" style="width:100%"></div></div>
   <div class="bar-label"><span>Hunger</span></div>
   <div class="bar-track"><div class="bar-fill" id="hunger-fill" style="width:100%"></div></div>
+  <div id="apple-count">Apples: 2 (press F to eat)</div>
 </div>
 <div id="players-online">Players online: 1</div>
 <div id="dead-banner">You died — respawning...</div>

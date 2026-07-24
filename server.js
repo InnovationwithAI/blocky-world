@@ -82,6 +82,12 @@ io.on('connection', (socket) => {
     if (mob.health <= 0) delete mobs[mobId];
   });
 
+  socket.on('eat', () => {
+    const p = players[socket.id];
+    if (!p) return;
+    p.hunger = Math.min(20, p.hunger + 6);
+  });
+
   socket.on('disconnect', () => {
     delete players[socket.id];
     io.emit('playerLeft', { id: socket.id });
@@ -121,16 +127,16 @@ setInterval(() => {
       mob.x += (dx / len) * speed;
       mob.z += (dz / len) * speed;
       mob.y = World.heightAt(Math.round(mob.x), Math.round(mob.z)) + 1.5;
-      if (nd < 2.25 && (!mob.lastHit || Date.now() - mob.lastHit > 1000)) {
-        nearest.health = Math.max(0, nearest.health - 2);
+      if (nd < 2.25 && (!mob.lastHit || Date.now() - mob.lastHit > 1800)) {
+        nearest.health = Math.max(0, nearest.health - 1);
         mob.lastHit = Date.now();
       }
     }
   }
 
   for (const [id, p] of playerList) {
-    p.hunger = Math.max(0, p.hunger - 0.02);
-    if (p.hunger <= 0) p.health = Math.max(0, p.health - 0.05);
+    p.hunger = Math.max(0, p.hunger - 0.015);
+    if (p.hunger <= 0) p.health = Math.max(0, p.health - 0.015);
     if (p.health <= 0) {
       const spawn = randomSpawn();
       p.x = spawn.x; p.y = spawn.y; p.z = spawn.z;
