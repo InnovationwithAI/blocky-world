@@ -51,17 +51,44 @@
     position: fixed; inset: 0; display: none; align-items: center; justify-content: center;
     color: #ff5555; font-size: 42px; font-weight: bold; background: rgba(0,0,0,0.4); z-index: 15; pointer-events: none;
   }
+  #toast-container {
+    position: fixed; top: 70px; left: 50%; transform: translateX(-50%);
+    display: flex; flex-direction: column; gap: 6px; align-items: center; pointer-events: none; z-index: 25;
+  }
+  .toast {
+    background: rgba(20,20,20,0.85); color: white; padding: 6px 14px; border-radius: 6px;
+    font-size: 13px; opacity: 0; transition: opacity 0.3s ease;
+  }
+  .toast.show { opacity: 1; }
+  #craft-menu {
+    position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%);
+    display: none; flex-direction: column; gap: 4px; background: rgba(15,15,15,0.92);
+    border: 2px solid rgba(255,255,255,0.3); border-radius: 8px; padding: 14px; color: white;
+    min-width: 320px; z-index: 22;
+  }
+  #craft-menu h2 { margin: 0 0 6px 0; font-size: 16px; text-align: center; }
+  .recipe { display: flex; justify-content: space-between; align-items: center; padding: 6px 8px; border-radius: 5px; }
+  .recipe.selected { background: rgba(255,255,255,0.18); }
+  .recipe .name { font-size: 13px; }
+  .recipe .cost { font-size: 11px; opacity: 0.7; }
+  #craft-hint { font-size: 11px; opacity: 0.7; text-align: center; margin-top: 6px; }
 </style>
 </head>
 <body>
 <div id="crosshair"></div>
-<div id="hint">WASD move &middot; Mouse or Arrow keys look &middot; Space jump &middot; Left-click/J break/attack &middot; Right-click/K place &middot; 1-6 select block &middot; C craft planks &middot; F eat apple</div>
+<div id="hint">WASD move &middot; Look: mouse/arrows &middot; Space jump &middot; J break/attack &middot; K place/plant/shoot &middot; 1-6 hotbar &middot; E crafting &middot; F eat &middot; B breed &middot; N sleep &middot; R ride cart &middot; G creative</div>
+<div id="toast-container"></div>
+<div id="craft-menu">
+  <h2>Crafting</h2>
+  <div id="recipe-list"></div>
+  <div id="craft-hint">Up/Down or mouse to select &middot; Enter/click to craft &middot; E to close</div>
+</div>
 <div id="stats">
   <div class="bar-label"><span>Health</span></div>
   <div class="bar-track"><div class="bar-fill" id="health-fill" style="width:100%"></div></div>
   <div class="bar-label"><span>Hunger</span></div>
   <div class="bar-track"><div class="bar-fill" id="hunger-fill" style="width:100%"></div></div>
-  <div id="apple-count">Apples: 2 (press F to eat)</div>
+  <div id="apple-count">Apples: 2 | Meat: 0 (F to eat)</div>
 </div>
 <div id="players-online">Players online: 1</div>
 <div id="dead-banner">You died — respawning...</div>

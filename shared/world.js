@@ -16,6 +16,10 @@
     let n = Math.sin(x * 127.1 + z * 311.7 + SEED * 0.017) * 43758.5453123;
     return n - Math.floor(n);
   }
+  function hash3(x, y, z) {
+    let n = Math.sin(x * 127.1 + y * 269.5 + z * 419.2 + SEED * 0.013) * 43758.5453123;
+    return n - Math.floor(n);
+  }
 
   function lerp(a, b, t) { return a + (b - a) * t; }
   function smooth(t) { return t * t * (3 - 2 * t); }
@@ -30,32 +34,55 @@
     return lerp(ix0, ix1, sz);
   }
 
+  function valueNoise3(x, y, z) {
+    const x0 = Math.floor(x), y0 = Math.floor(y), z0 = Math.floor(z);
+    const sx = smooth(x - x0), sy = smooth(y - y0), sz = smooth(z - z0);
+    const c000 = hash3(x0, y0, z0), c100 = hash3(x0 + 1, y0, z0);
+    const c010 = hash3(x0, y0 + 1, z0), c110 = hash3(x0 + 1, y0 + 1, z0);
+    const c001 = hash3(x0, y0, z0 + 1), c101 = hash3(x0 + 1, y0, z0 + 1);
+    const c011 = hash3(x0, y0 + 1, z0 + 1), c111 = hash3(x0 + 1, y0 + 1, z0 + 1);
+    const x00 = lerp(c000, c100, sx), x10 = lerp(c010, c110, sx);
+    const x01 = lerp(c001, c101, sx), x11 = lerp(c011, c111, sx);
+    const y0i = lerp(x00, x10, sy), y1i = lerp(x01, x11, sy);
+    return lerp(y0i, y1i, sz);
+  }
+
+  // Large, slow-varying noise picks one of a few biomes per region.
+  function biomeAt(x, z) {
+    const v = valueNoise(x * 0.01, z * 0.01);
+    if (v < 0.35) return 'desert';
+    if (v > 0.68) return 'snow';
+    return 'forest';
+  }
+
   // Multi-octave height in blocks (integer), plus whether a tree grows there.
   function heightAt(x, z) {
     let h = 0;
     h += valueNoise(x * 0.04, z * 0.04) * 10;
     h += valueNoise(x * 0.09, z * 0.09) * 4;
     h += valueNoise(x * 0.2, z * 0.2) * 1.5;
-    return Math.max(1, Math.round(h * 0.6) + 3);
+    const biome = biomeAt(x, z);
+    const flatten = biome === 'desert' ? 0.7 : 1;
+    return Math.max(1, Math.round(h * 0.6 * flatten) + 3);
   }
 
   function treeAt(x, z) {
-    // Deterministic sparse tree placement independent of height noise.
+    const biome = biomeAt(x, z);
+    if (biome === 'desert') return false;
     const v = hash(x * 0.31 + 91.7, z * 0.31 - 44.3);
-    return v > 0.99;
+    const threshold = biome === 'snow' ? 0.995 : 0.99;
+    return v > threshold;
   }
 
-  // Returns column definitions for one chunk: { "lx,lz": { height, tree } }
+  // Returns column definitions for one chunk: { "lx,lz": { height, tree, biome } }
   function generateChunkColumns(cx, cz) {
     const columns = {};
     for (let lx = 0; lx < CHUNK_SIZE; lx++) {
       for (let lz = 0; lz < CHUNK_SIZE; lz++) {
         const wx = cx * CHUNK_SIZE + lx;
         const wz = cz * CHUNK_SIZE + lz;
-        columns[lx + ',' + lz] = {
-          height: heightAt(wx, wz),
-          tree: treeAt(wx, wz) && heightAt(wx, wz) > 0
-        };
+        const h = heightAt(wx, wz);
+        columns[lx + ',' + lz] = { height: h, tree: treeAt(wx, wz) && h > 0, biome: biomeAt(wx, wz) };
       }
     }
     return columns;
@@ -66,12 +93,29 @@
   }
 
   // Material for a given y within a column whose surface is at `height`.
-  function materialAt(y, height) {
+  function materialAt(y, height, biome) {
     if (y === BEDROCK_Y) return 'bedrock';
-    if (y === height - 1) return 'grass';
-    if (y >= height - 1 - DIRT_DEPTH) return 'dirt';
+    if (y === height - 1) {
+      if (biome === 'desert') return 'sand';
+      if (biome === 'snow') return 'snow';
+      return 'grass';
+    }
+    if (y >= height - 1 - DIRT_DEPTH) return biome === 'desert' ? 'sand' : 'dirt';
     return 'stone';
   }
 
-  return { CHUNK_SIZE, BEDROCK_Y, DIRT_DEPTH, heightAt, treeAt, materialAt, generateChunkColumns, worldToChunk, hash };
+  // Carve underground tunnels/pockets with 3D noise. Kept away from bedrock
+  // and the near-surface layer so it doesn't turn every hill into swiss cheese.
+  function isCave(x, y, z, height) {
+    if (y <= BEDROCK_Y + 1) return false;
+    if (y >= height - 3) return false;
+    const n = valueNoise3(x * 0.11, y * 0.16, z * 0.11);
+    return n > 0.74;
+  }
+
+  return {
+    CHUNK_SIZE, BEDROCK_Y, DIRT_DEPTH,
+    heightAt, treeAt, biomeAt, materialAt, isCave,
+    generateChunkColumns, worldToChunk, hash
+  };
 });
