@@ -44,8 +44,42 @@ const boxGeo = new THREE.BoxGeometry(1, 1, 1);
 const meshes = {};       // material -> InstancedMesh
 const meshUserData = {}; // material -> { count, capacity, positions: [] }
 
+// Small procedural noise texture per material - crisp/pixelated on purpose,
+// so blocks read as textured surfaces instead of flat plastic color.
+function makeBlockTexture(hexColor, variance, grain) {
+  const size = 16;
+  const canvas = document.createElement('canvas');
+  canvas.width = canvas.height = size;
+  const ctx = canvas.getContext('2d');
+  const base = new THREE.Color(hexColor);
+  for (let y = 0; y < size; y++) {
+    for (let x = 0; x < size; x++) {
+      let n = Math.sin(x * 12.9898 + y * 78.233) * 43758.5453;
+      n = n - Math.floor(n);
+      if (grain === 'vertical') n = (n + (x % 3) * 0.15) % 1;
+      const shade = 1 + (n - 0.5) * variance;
+      const r = Math.min(255, Math.max(0, Math.round(base.r * 255 * shade)));
+      const g = Math.min(255, Math.max(0, Math.round(base.g * 255 * shade)));
+      const b = Math.min(255, Math.max(0, Math.round(base.b * 255 * shade)));
+      ctx.fillStyle = `rgb(${r},${g},${b})`;
+      ctx.fillRect(x, y, 1, 1);
+    }
+  }
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.magFilter = THREE.NearestFilter;
+  tex.minFilter = THREE.NearestFilter;
+  tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+  return tex;
+}
+const MATERIAL_VARIANCE = { grass: 0.35, dirt: 0.4, stone: 0.3, wood: 0.5, leaves: 0.4, planks: 0.3, bedrock: 0.5 };
+const MATERIAL_GRAIN = { wood: 'vertical', planks: 'vertical' };
+const blockTextures = {};
+Object.keys(MATERIAL_COLORS).forEach((m) => {
+  blockTextures[m] = makeBlockTexture(MATERIAL_COLORS[m], MATERIAL_VARIANCE[m] || 0.3, MATERIAL_GRAIN[m]);
+});
+
 function createMeshFor(material, capacity) {
-  const mat = new THREE.MeshLambertMaterial({ color: MATERIAL_COLORS[material] });
+  const mat = new THREE.MeshLambertMaterial({ map: blockTextures[material] });
   const mesh = new THREE.InstancedMesh(boxGeo, mat, capacity);
   mesh.count = 0;
   mesh.castShadow = true;
@@ -160,6 +194,36 @@ const loadedChunks = new Set();
 const requestedChunks = new Set();
 const pendingEdits = new Map(); // chunkKey -> edits (received before we asked, safety)
 
+// Tapered, rounded canopy (wide base -> mid layer -> small cap) instead of a
+// solid cube blob, plus a deterministic trunk-height variation per tree.
+function buildTree(wx, wz, groundHeight, chunkKey) {
+  const v = World.hash(wx * 7.7 + 3.1, wz * 7.7 - 5.2);
+  const trunkH = 4 + (v > 0.5 ? 1 : 0);
+  const topY = groundHeight + trunkH - 1;
+
+  for (let ty = groundHeight; ty < groundHeight + trunkH; ty++) {
+    addBlockInstance(wx, ty, wz, 'wood', chunkKey);
+  }
+
+  for (let dx = -2; dx <= 2; dx++) {
+    for (let dz = -2; dz <= 2; dz++) {
+      if (Math.abs(dx) === 2 && Math.abs(dz) === 2) continue; // round off far corners
+      if (dx === 0 && dz === 0) continue; // trunk already occupies this cell
+      addBlockInstance(wx + dx, topY, wz + dz, 'leaves', chunkKey);
+    }
+  }
+  for (let dx = -1; dx <= 1; dx++) {
+    for (let dz = -1; dz <= 1; dz++) {
+      addBlockInstance(wx + dx, topY + 1, wz + dz, 'leaves', chunkKey);
+    }
+  }
+  addBlockInstance(wx, topY + 2, wz, 'leaves', chunkKey);
+  addBlockInstance(wx + 1, topY + 2, wz, 'leaves', chunkKey);
+  addBlockInstance(wx - 1, topY + 2, wz, 'leaves', chunkKey);
+  addBlockInstance(wx, topY + 2, wz + 1, 'leaves', chunkKey);
+  addBlockInstance(wx, topY + 2, wz - 1, 'leaves', chunkKey);
+}
+
 function loadChunk(cx, cz, columns, edits) {
   const chunkKey = cx + ',' + cz;
   if (loadedChunks.has(chunkKey)) return;
@@ -174,17 +238,7 @@ function loadChunk(cx, cz, columns, edits) {
     for (let y = World.BEDROCK_Y; y < height; y++) {
       addBlockInstance(wx, y, wz, World.materialAt(y, height), chunkKey);
     }
-    if (tree) {
-      for (let ty = height; ty < height + 3; ty++) addBlockInstance(wx, ty, wz, 'wood', chunkKey);
-      for (let lxo = -1; lxo <= 1; lxo++) {
-        for (let lzo = -1; lzo <= 1; lzo++) {
-          for (let lyo = 0; lyo <= 1; lyo++) {
-            if (lxo === 0 && lzo === 0 && lyo === 0) continue;
-            addBlockInstance(wx + lxo, height + 3 + lyo, wz + lzo, 'leaves', chunkKey);
-          }
-        }
-      }
-    }
+    if (tree) buildTree(wx, wz, height, chunkKey);
   }
 
   // apply persisted edits on top of procedural base
@@ -242,14 +296,31 @@ const remoteMobs = new Map();    // id -> { mesh, target }
 let dayClock = 0;
 let myHealth = 20, myHunger = 20;
 
+const SKIN_TONE = 0xe0ac69;
 function makePlayerMesh(color) {
   const group = new THREE.Group();
-  const body = new THREE.Mesh(new THREE.CylinderGeometry(0.3, 0.3, 1.2, 8), new THREE.MeshLambertMaterial({ color }));
-  body.position.y = 0.6;
-  const head = new THREE.Mesh(new THREE.SphereGeometry(0.3, 8, 8), new THREE.MeshLambertMaterial({ color }));
-  head.position.y = 1.5;
-  body.castShadow = head.castShadow = true;
-  group.add(body, head);
+  const bodyMat = new THREE.MeshLambertMaterial({ color });
+  const skinMat = new THREE.MeshLambertMaterial({ color: SKIN_TONE });
+
+  const head = new THREE.Mesh(new THREE.BoxGeometry(0.45, 0.45, 0.45), skinMat);
+  head.position.y = 1.475;
+
+  const torso = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.65, 0.3), bodyMat);
+  torso.position.y = 0.925;
+
+  const legGeo = new THREE.BoxGeometry(0.22, 0.65, 0.25);
+  const legL = new THREE.Mesh(legGeo, bodyMat);
+  legL.position.set(-0.13, 0.325, 0);
+  const legR = new THREE.Mesh(legGeo, bodyMat);
+  legR.position.set(0.13, 0.325, 0);
+
+  const armGeo = new THREE.BoxGeometry(0.2, 0.65, 0.2);
+  const armL = new THREE.Mesh(armGeo, skinMat);
+  armL.position.set(-0.35, 0.925, 0);
+  const armR = new THREE.Mesh(armGeo, skinMat);
+  armR.position.set(0.35, 0.925, 0);
+
+  [head, torso, legL, legR, armL, armR].forEach((m) => { m.castShadow = true; group.add(m); });
   scene.add(group);
   return group;
 }
@@ -366,6 +437,7 @@ const TURN_SPEED = 2.4; // radians/sec for keyboard look
 const EYE_HEIGHT = 1.3;   // eye above feet
 const PLAYER_HEIGHT = 1.7; // total body height
 const PLAYER_RADIUS = 0.3;
+const STEP_HEIGHT = 1.05;  // auto-climb ledges up to one block tall while grounded
 
 function isSolidBlock(x, y, z) {
   return blockAt.has(bkey(Math.round(x), Math.round(y), Math.round(z)));
@@ -561,9 +633,19 @@ function animate() {
     if (step.lengthSq() > 0) step.normalize().multiplyScalar(MOVE_SPEED * dt);
 
     const tryX = camera.position.x + step.x;
-    if (canStandAt(tryX, camera.position.y, camera.position.z)) camera.position.x = tryX;
+    if (canStandAt(tryX, camera.position.y, camera.position.z)) {
+      camera.position.x = tryX;
+    } else if (onGround && canStandAt(tryX, camera.position.y + STEP_HEIGHT, camera.position.z)) {
+      camera.position.x = tryX;
+      camera.position.y += STEP_HEIGHT;
+    }
     const tryZ = camera.position.z + step.z;
-    if (canStandAt(camera.position.x, camera.position.y, tryZ)) camera.position.z = tryZ;
+    if (canStandAt(camera.position.x, camera.position.y, tryZ)) {
+      camera.position.z = tryZ;
+    } else if (onGround && canStandAt(camera.position.x, camera.position.y + STEP_HEIGHT, tryZ)) {
+      camera.position.z = tryZ;
+      camera.position.y += STEP_HEIGHT;
+    }
 
     velocityY += GRAVITY * dt;
     const tryY = camera.position.y + velocityY * dt;
