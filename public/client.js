@@ -1,3 +1,58 @@
+// ---------- Procedural audio (no external sound files) ----------
+let audioCtx = null;
+function ensureAudio() {
+  if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  if (audioCtx.state === 'suspended') audioCtx.resume();
+}
+
+function playTone({ freq = 440, duration = 0.12, type = 'sine', volume = 0.15, slideTo = null }) {
+  if (!audioCtx) return;
+  const osc = audioCtx.createOscillator();
+  const gain = audioCtx.createGain();
+  osc.type = type;
+  osc.frequency.setValueAtTime(freq, audioCtx.currentTime);
+  if (slideTo !== null) osc.frequency.linearRampToValueAtTime(slideTo, audioCtx.currentTime + duration);
+  gain.gain.setValueAtTime(volume, audioCtx.currentTime);
+  gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + duration);
+  osc.connect(gain);
+  gain.connect(audioCtx.destination);
+  osc.start();
+  osc.stop(audioCtx.currentTime + duration);
+}
+
+function playNoise({ duration = 0.1, volume = 0.15, filterFreq = 1200 }) {
+  if (!audioCtx) return;
+  const bufferSize = Math.floor(audioCtx.sampleRate * duration);
+  const buffer = audioCtx.createBuffer(1, bufferSize, audioCtx.sampleRate);
+  const data = buffer.getChannelData(0);
+  for (let i = 0; i < bufferSize; i++) data[i] = (Math.random() * 2 - 1) * (1 - i / bufferSize);
+  const src = audioCtx.createBufferSource();
+  src.buffer = buffer;
+  const filter = audioCtx.createBiquadFilter();
+  filter.type = 'lowpass';
+  filter.frequency.value = filterFreq;
+  const gain = audioCtx.createGain();
+  gain.gain.setValueAtTime(volume, audioCtx.currentTime);
+  gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + duration);
+  src.connect(filter);
+  filter.connect(gain);
+  gain.connect(audioCtx.destination);
+  src.start();
+}
+
+const sfx = {
+  footstep: () => playNoise({ duration: 0.08, volume: 0.06, filterFreq: 800 }),
+  breakBlock: () => playNoise({ duration: 0.15, volume: 0.18, filterFreq: 1500 }),
+  placeBlock: () => playNoise({ duration: 0.1, volume: 0.14, filterFreq: 600 }),
+  jump: () => playTone({ freq: 300, slideTo: 420, duration: 0.15, type: 'sine', volume: 0.12 }),
+  land: () => playNoise({ duration: 0.12, volume: 0.2, filterFreq: 400 }),
+  hurt: () => playTone({ freq: 180, slideTo: 90, duration: 0.25, type: 'sawtooth', volume: 0.18 }),
+  attack: () => playTone({ freq: 500, slideTo: 250, duration: 0.1, type: 'triangle', volume: 0.14 }),
+  splash: () => playNoise({ duration: 0.2, volume: 0.15, filterFreq: 2000 }),
+  nightfall: () => playTone({ freq: 220, slideTo: 110, duration: 1.2, type: 'sine', volume: 0.08 }),
+  daybreak: () => playTone({ freq: 330, slideTo: 440, duration: 1.2, type: 'sine', volume: 0.08 })
+};
+
 // ---------- Scene setup ----------
 const scene = new THREE.Scene();
 const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
@@ -23,8 +78,61 @@ sunLight.shadow.bias = -0.0015;
 scene.add(sunLight);
 scene.add(sunLight.target);
 
+// ---------- Sun & moon sprites ----------
+function makeGlowTexture(rgb) {
+  const size = 64;
+  const canvas = document.createElement('canvas');
+  canvas.width = canvas.height = size;
+  const ctx = canvas.getContext('2d');
+  const grad = ctx.createRadialGradient(size / 2, size / 2, 0, size / 2, size / 2, size / 2);
+  grad.addColorStop(0, `rgba(${rgb},1)`);
+  grad.addColorStop(0.4, `rgba(${rgb},0.9)`);
+  grad.addColorStop(1, `rgba(${rgb},0)`);
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, size, size);
+  return new THREE.CanvasTexture(canvas);
+}
+const sunSprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: makeGlowTexture('255,244,214'), transparent: true, depthWrite: false, fog: false }));
+sunSprite.scale.set(16, 16, 1);
+scene.add(sunSprite);
+const moonSprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: makeGlowTexture('222,228,245'), transparent: true, depthWrite: false, fog: false }));
+moonSprite.scale.set(11, 11, 1);
+scene.add(moonSprite);
+
 const DAY_SKY = new THREE.Color(0x7ec0ee);
 const NIGHT_SKY = new THREE.Color(0x0a0e2a);
+const UNDERWATER_TINT = new THREE.Color(0x1a4a7a);
+
+// ---------- Block-break particles ----------
+const particleGeo = new THREE.BoxGeometry(0.15, 0.15, 0.15);
+const particleMaterials = {};
+const activeParticles = [];
+function spawnBreakParticles(x, y, z, material) {
+  if (!particleMaterials[material]) {
+    particleMaterials[material] = new THREE.MeshLambertMaterial({ color: MATERIAL_COLORS[material] || 0x888888 });
+  }
+  const mat = particleMaterials[material];
+  for (let i = 0; i < 6; i++) {
+    const mesh = new THREE.Mesh(particleGeo, mat);
+    mesh.position.set(x + (Math.random() - 0.5) * 0.7, y + (Math.random() - 0.5) * 0.7, z + (Math.random() - 0.5) * 0.7);
+    scene.add(mesh);
+    activeParticles.push({
+      mesh,
+      velocity: new THREE.Vector3((Math.random() - 0.5) * 2.5, Math.random() * 2.5 + 1, (Math.random() - 0.5) * 2.5),
+      life: 0.6
+    });
+  }
+}
+function updateParticles(dt) {
+  for (let i = activeParticles.length - 1; i >= 0; i--) {
+    const p = activeParticles[i];
+    p.life -= dt;
+    if (p.life <= 0) { scene.remove(p.mesh); activeParticles.splice(i, 1); continue; }
+    p.velocity.y -= 9 * dt;
+    p.mesh.position.addScaledVector(p.velocity, dt);
+    p.mesh.scale.setScalar(Math.max(0, p.life / 0.6));
+  }
+}
 scene.fog = new THREE.Fog(0x7ec0ee, 50, 110);
 
 window.addEventListener('resize', () => {
@@ -176,6 +284,7 @@ const plateBlocks = new Set();    // "x,y,z" keys of placed pressure plates
 const doorPositions = new Set();  // "x,y,z" keys of doors ever placed (open or closed)
 const pistonPositions = new Set(); // "x,y,z" keys of placed pistons
 const hopperPositions = new Set(); // "x,y,z" keys of placed hoppers
+const fallingBlocks = new Set();  // "x,y,z" keys of sand blocks that may need to fall
 
 function bkey(x, y, z) { return x + ',' + y + ',' + z; }
 function ckey(x, z) { return x + ',' + z; }
@@ -237,6 +346,8 @@ function removeBlockInstance(x, y, z) {
   if (colSet) { colSet.delete(y); if (colSet.size === 0) columnBlocks.delete(ck); }
   portalBlocks.delete(k);
   plateBlocks.delete(k);
+  const aboveEntry = blockAt.get(bkey(x, y + 1, z));
+  if (aboveEntry && aboveEntry.material === 'sand') fallingBlocks.add(bkey(x, y + 1, z));
   return entry.material;
 }
 
@@ -244,12 +355,17 @@ function removeBlockInstance(x, y, z) {
 // Ignores floating blocks (e.g. a tree canopy's leaves) that sit far above
 // the player - otherwise walking under/near a tree "ground-snaps" onto it.
 function groundHeightBelow(x, z, feetY) {
-  const set = columnBlocks.get(ckey(Math.round(x), Math.round(z)));
+  const rx = Math.round(x), rz = Math.round(z);
+  const set = columnBlocks.get(ckey(rx, rz));
   if (!set || set.size === 0) return -Infinity;
   const maxY = feetY + 1.1;
   let best = -Infinity;
   for (const y of set) {
-    if (y <= maxY && y > best) best = y;
+    if (y <= maxY && y > best) {
+      const entry = blockAt.get(bkey(rx, y, rz));
+      if (entry && entry.material === 'water') continue; // water has no standing surface
+      best = y;
+    }
   }
   return best;
 }
@@ -541,7 +657,10 @@ socket.on('lootDrop', ({ kind }) => {
 });
 socket.on('tick', (data) => {
   for (const [id, p] of Object.entries(data.players)) {
-    if (id === selfId) { myHealth = p.health; myHunger = p.hunger; continue; }
+    if (id === selfId) {
+      if (p.health < myHealth - 0.5) sfx.hurt();
+      myHealth = p.health; myHunger = p.hunger; continue;
+    }
     let rp = remotePlayers.get(id);
     if (!rp) { addRemotePlayer(id, p); rp = remotePlayers.get(id); }
     rp.target = { x: p.x, y: p.y, z: p.z, ry: p.ry };
@@ -565,19 +684,26 @@ const controls = new THREE.PointerLockControls(camera, document.body);
 const instructions = document.getElementById('instructions');
 let gameStarted = false;
 function startGame() {
-  if (gameStarted) return;
-  gameStarted = true;
+  // Releasing the mouse (ESC, alt-tab, losing pointer lock) should not
+  // "un-start" the game or freeze keyboard play - only the very first call
+  // flips gameStarted; every call still tries to (re)acquire the mouse.
+  if (!gameStarted) {
+    gameStarted = true;
+    ensureAudio();
+  }
   instructions.style.display = 'none';
   try { controls.lock(); } catch (e) { /* no mouse available - keyboard controls still work */ }
 }
 instructions.addEventListener('click', startGame);
-controls.addEventListener('unlock', () => { instructions.style.display = 'flex'; gameStarted = false; });
+controls.addEventListener('unlock', () => { instructions.style.display = 'flex'; });
 
 const move = { forward: false, back: false, left: false, right: false, up: false, down: false };
 const look = { left: false, right: false, up: false, down: false };
 let velocityY = 0;
 let onGround = false;
 let fallPeakY = null;
+let footstepTimer = 0;
+let inWater = false;
 const GRAVITY = -20;
 const JUMP_SPEED = 8;
 const MOVE_SPEED = 6;
@@ -591,7 +717,8 @@ const PLAYER_RADIUS = 0.3;
 const STEP_HEIGHT = 1.05;  // auto-climb ledges up to one block tall while grounded
 
 function isSolidBlock(x, y, z) {
-  return blockAt.has(bkey(Math.round(x), Math.round(y), Math.round(z)));
+  const entry = blockAt.get(bkey(Math.round(x), Math.round(y), Math.round(z)));
+  return !!entry && entry.material !== 'water'; // water is passable/swimmable, not solid
 }
 
 // Can the player's body occupy this eye position without overlapping a solid block?
@@ -824,7 +951,8 @@ document.addEventListener('keydown', (e) => {
     case 'ArrowDown': look.down = true; break;
     case 'Space':
       if (creativeMode || spectatorMode) move.up = true;
-      else if (onGround) { velocityY = JUMP_SPEED; onGround = false; }
+      else if (inWater) move.up = true;
+      else if (onGround) { velocityY = JUMP_SPEED; onGround = false; sfx.jump(); }
       break;
     case 'ShiftLeft': move.down = true; break;
     case 'Digit1': case 'Digit2': case 'Digit3': case 'Digit4': case 'Digit5': case 'Digit6': {
@@ -894,6 +1022,7 @@ function breakOrAttack() {
       if (inventory.tools.swordEnchanted) dmg += TOOL_ENCHANT_BONUS.sword;
       if (performance.now() < strengthBuffUntil) dmg += 3;
       socket.emit('attackEntity', { entityId, damage: dmg });
+      sfx.attack();
       unlockAchievement('first_attack', 'Fighter');
       return;
     }
@@ -930,6 +1059,8 @@ function breakOrAttack() {
   renderHotbar();
   document.getElementById('apple-count').textContent = `Apples: ${inventory.apple} | Meat: ${inventory.meat} (F to eat)`;
   socket.emit('blockEdit', { x: pos.x, y: pos.y, z: pos.z, action: 'remove' });
+  sfx.breakBlock();
+  spawnBreakParticles(pos.x, pos.y, pos.z, material);
   unlockAchievement('first_break', 'Block Breaker');
 }
 
@@ -960,6 +1091,8 @@ function placeBlock() {
   renderHotbar();
   addBlockInstance(nx, ny, nz, placeMaterial, chunkKey);
   socket.emit('blockEdit', { x: nx, y: ny, z: nz, action: 'add', material: placeMaterial });
+  sfx.placeBlock();
+  if (placeMaterial === 'sand') fallingBlocks.add(bkey(nx, ny, nz));
 
   if (placeMaterial === 'portal') portalCooldownUntil = Math.max(portalCooldownUntil, performance.now());
   if (placeMaterial === 'wheat_young') unlockAchievement('first_plant', 'Farmer');
@@ -1315,6 +1448,28 @@ function checkLavaContact() {
   }
 }
 
+let fallingBlocksCheckAt = 0;
+function processFallingBlocks() {
+  if (fallingBlocks.size === 0 || performance.now() < fallingBlocksCheckAt) return;
+  fallingBlocksCheckAt = performance.now() + 120;
+  for (const key of Array.from(fallingBlocks)) {
+    const [x, y, z] = key.split(',').map(Number);
+    const entry = blockAt.get(key);
+    if (!entry || entry.material !== 'sand') { fallingBlocks.delete(key); continue; }
+    if (blockAt.has(bkey(x, y - 1, z))) { fallingBlocks.delete(key); continue; } // supported, done falling
+    removeBlockInstance(x, y, z);
+    socket.emit('blockEdit', { x, y, z, action: 'remove' });
+    const chunkKey = currentDim === 'nether' ? 'nether,nether' : (() => {
+      const [cx, cz] = World.worldToChunk(x, z);
+      return cx + ',' + cz;
+    })();
+    addBlockInstance(x, y - 1, z, 'sand', chunkKey);
+    socket.emit('blockEdit', { x, y: y - 1, z, action: 'add', material: 'sand' });
+    fallingBlocks.delete(key);
+    fallingBlocks.add(bkey(x, y - 1, z));
+  }
+}
+
 let hopperCheckCooldownUntil = 0;
 function checkHopperAutoHarvest() {
   if (!gameStarted || hopperPositions.size === 0 || performance.now() < hopperCheckCooldownUntil) return;
@@ -1419,6 +1574,11 @@ function animate() {
     if (move.up) camera.position.y += FLY_SPEED * dt;
     if (move.down) camera.position.y -= FLY_SPEED * dt;
   } else if (gameStarted && !menusOpen) {
+    const wasInWater = inWater;
+    const waterCheckEntry = blockAt.get(bkey(Math.round(camera.position.x), Math.round(camera.position.y - EYE_HEIGHT + 0.6), Math.round(camera.position.z)));
+    inWater = !!(waterCheckEntry && waterCheckEntry.material === 'water');
+    if (inWater !== wasInWater) { sfx.splash(); fallPeakY = null; }
+
     const dir = new THREE.Vector3();
     camera.getWorldDirection(dir);
     dir.y = 0; dir.normalize();
@@ -1429,8 +1589,16 @@ function animate() {
     if (move.back) step.sub(dir);
     if (move.right) step.add(right);
     if (move.left) step.sub(right);
-    const effSpeed = MOVE_SPEED * (performance.now() < speedBuffUntil ? 1.6 : 1);
-    if (step.lengthSq() > 0) step.normalize().multiplyScalar(effSpeed * dt);
+    const isMoving = step.lengthSq() > 0;
+    const sprinting = onGround && move.down && isMoving && !inWater;
+    const speedBuff = performance.now() < speedBuffUntil ? 1.6 : 1;
+    const effSpeed = MOVE_SPEED * speedBuff * (sprinting ? 1.4 : 1) * (inWater ? 0.55 : 1);
+    if (isMoving) step.normalize().multiplyScalar(effSpeed * dt);
+
+    if (onGround && isMoving && !inWater) {
+      footstepTimer -= dt;
+      if (footstepTimer <= 0) { sfx.footstep(); footstepTimer = sprinting ? 0.28 : 0.4; }
+    }
 
     const tryX = camera.position.x + step.x;
     if (canStandAt(tryX, camera.position.y, camera.position.z)) {
@@ -1449,7 +1617,11 @@ function animate() {
 
     if (!onGround) fallPeakY = fallPeakY === null ? camera.position.y : Math.max(fallPeakY, camera.position.y);
 
-    velocityY += GRAVITY * dt;
+    velocityY += GRAVITY * (inWater ? 0.25 : 1) * dt;
+    if (inWater) {
+      if (move.up) velocityY = Math.min(velocityY + 20 * dt, 3);
+      velocityY = Math.max(velocityY, -3);
+    }
     const tryY = camera.position.y + velocityY * dt;
     const feetY = camera.position.y - EYE_HEIGHT;
 
@@ -1457,9 +1629,10 @@ function animate() {
       const ground = groundHeightBelow(camera.position.x, camera.position.z, feetY);
       const feetLevel = (ground === -Infinity ? World.BEDROCK_Y - 1 : ground) + 0.5 + EYE_HEIGHT;
       if (tryY <= feetLevel) {
-        if (!onGround && fallPeakY !== null && !creativeMode) {
+        if (!onGround && fallPeakY !== null) {
           const fallDistance = fallPeakY - feetLevel;
-          if (fallDistance > 4) {
+          if (fallDistance > 1.5) sfx.land();
+          if (fallDistance > 4 && !creativeMode) {
             socket.emit('takeDamage', { amount: Math.round((fallDistance - 4) * 2) });
             showToast('Ouch! That fall hurt');
           }
@@ -1486,6 +1659,8 @@ function animate() {
   checkPressurePlate();
   checkLavaContact();
   checkHopperAutoHarvest();
+  processFallingBlocks();
+  updateParticles(dt);
 
   for (const [, rp] of remotePlayers) {
     rp.mesh.position.lerp(new THREE.Vector3(rp.target.x, rp.target.y - 0.9, rp.target.z), 0.25);
@@ -1496,6 +1671,8 @@ function animate() {
   }
 
   if (lastDayClock > 0.9 && dayClock < 0.1 && myHealth > 0) unlockAchievement('survived_night', 'Survived the Night');
+  if (lastDayClock < 0.5 && dayClock >= 0.5) sfx.nightfall();
+  if (lastDayClock < 0.95 && dayClock >= 0.95) sfx.daybreak();
   lastDayClock = dayClock;
 
   updateWeather(dt);
@@ -1510,8 +1687,19 @@ function animate() {
   else brightness = 1;
 
   const sky = DAY_SKY.clone().lerp(NIGHT_SKY, 1 - brightness);
-  scene.background = sky;
-  scene.fog.color = sky;
+  const eyeEntry = blockAt.get(bkey(Math.round(camera.position.x), Math.round(camera.position.y), Math.round(camera.position.z)));
+  const eyeInWater = !!(eyeEntry && eyeEntry.material === 'water');
+  if (eyeInWater) {
+    scene.background = UNDERWATER_TINT;
+    scene.fog.color = UNDERWATER_TINT;
+    scene.fog.near = 2;
+    scene.fog.far = 30;
+  } else {
+    scene.background = sky;
+    scene.fog.color = sky;
+    scene.fog.near = 50;
+    scene.fog.far = 110;
+  }
   sunLight.intensity = 0.25 + 0.95 * brightness;
   hemiLight.intensity = 0.35 + 0.75 * brightness;
   const angle = dayClock * Math.PI * 2;
@@ -1522,6 +1710,12 @@ function animate() {
   );
   sunLight.target.position.copy(camera.position);
   sunLight.target.updateMatrixWorld();
+
+  const skyDist = 200;
+  sunSprite.position.set(camera.position.x + Math.cos(angle) * skyDist, Math.sin(angle) * skyDist + 40, camera.position.z + 40);
+  moonSprite.position.set(camera.position.x - Math.cos(angle) * skyDist, -Math.sin(angle) * skyDist + 40, camera.position.z + 40);
+  sunSprite.material.opacity = Math.max(0, Math.sin(angle)) * 0.5 + brightness * 0.5;
+  moonSprite.material.opacity = Math.max(0, -Math.sin(angle)) * (1 - brightness * 0.5);
 
   document.getElementById('health-fill').style.width = Math.max(0, (myHealth / 20) * 100) + '%';
   document.getElementById('hunger-fill').style.width = Math.max(0, (myHunger / 20) * 100) + '%';
