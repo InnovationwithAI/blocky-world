@@ -33,6 +33,46 @@ window.addEventListener('resize', () => {
   renderer.setSize(window.innerWidth, window.innerHeight);
 });
 
+// ---------- Weather particles (rain/snow) ----------
+const WEATHER_COUNT = 300;
+const WEATHER_RADIUS = 18;
+const weatherGeo = new THREE.BufferGeometry();
+const weatherPositions = new Float32Array(WEATHER_COUNT * 3);
+for (let i = 0; i < WEATHER_COUNT; i++) {
+  weatherPositions[i * 3] = (Math.random() - 0.5) * WEATHER_RADIUS * 2;
+  weatherPositions[i * 3 + 1] = Math.random() * 20;
+  weatherPositions[i * 3 + 2] = (Math.random() - 0.5) * WEATHER_RADIUS * 2;
+}
+weatherGeo.setAttribute('position', new THREE.BufferAttribute(weatherPositions, 3));
+const weatherMat = new THREE.PointsMaterial({ color: 0xaaccff, size: 0.15, transparent: true, opacity: 0.7 });
+const weatherPoints = new THREE.Points(weatherGeo, weatherMat);
+weatherPoints.visible = false;
+scene.add(weatherPoints);
+
+function updateWeather(dt) {
+  const biome = World.biomeAt(Math.round(camera.position.x), Math.round(camera.position.z));
+  const active = isRaining && biome !== 'desert';
+  weatherPoints.visible = active;
+  // keep the particle cloud centered on the player horizontally; only local Y cycles
+  weatherPoints.position.x = camera.position.x;
+  weatherPoints.position.z = camera.position.z;
+  if (!active) return;
+  const snowing = biome === 'snow';
+  weatherMat.color.set(snowing ? 0xffffff : 0xaaccff);
+  weatherMat.size = snowing ? 0.12 : 0.15;
+  const fallSpeed = (snowing ? 3 : 14) * dt;
+  const pos = weatherGeo.attributes.position.array;
+  for (let i = 0; i < WEATHER_COUNT; i++) {
+    pos[i * 3 + 1] -= fallSpeed;
+    if (pos[i * 3 + 1] < -2) {
+      pos[i * 3] = (Math.random() - 0.5) * WEATHER_RADIUS * 2;
+      pos[i * 3 + 1] = 20;
+      pos[i * 3 + 2] = (Math.random() - 0.5) * WEATHER_RADIUS * 2;
+    }
+  }
+  weatherGeo.attributes.position.needsUpdate = true;
+}
+
 // ---------- Block materials & global instanced meshes ----------
 const CHUNK_SIZE = World.CHUNK_SIZE;
 const MATERIAL_COLORS = {
@@ -42,9 +82,12 @@ const MATERIAL_COLORS = {
   bed: 0xc23b3b,
   wheat_young: 0x9acd32, wheat_ripe: 0xe8c547,
   lever: 0x6b6b6b, plate: 0x7a7a5a, door: 0x8a5a3a,
-  rail: 0x9a9a9a, portal: 0x8e2de2, netherrack: 0x6b2020, lava: 0xff4500
+  rail: 0x9a9a9a, portal: 0x8e2de2, netherrack: 0x6b2020, lava: 0xff4500, water: 0x3a6fd8,
+  furnace: 0x555050, glass: 0xcfe8e8, wool: 0xf0ede4, stairs: 0xc9a876, slab: 0xdcc199,
+  enchant_table: 0x2d6b5e, brewing_stand: 0x6b4a8a, piston: 0x7a8a5a, hopper: 0x4a4a4a,
+  nether_brick: 0x3a1414
 };
-const UNBREAKABLE = new Set(['bedrock', 'lava']);
+const UNBREAKABLE = new Set(['bedrock', 'lava', 'water']);
 const boxGeo = new THREE.BoxGeometry(1, 1, 1);
 const meshes = {};       // material -> InstancedMesh
 const meshUserData = {}; // material -> { count, capacity, positions: [] }
@@ -79,7 +122,9 @@ function makeBlockTexture(hexColor, variance, grain) {
 const MATERIAL_VARIANCE = {
   grass: 0.35, dirt: 0.4, stone: 0.3, wood: 0.5, leaves: 0.4, planks: 0.3, bedrock: 0.5,
   sand: 0.25, snow: 0.15, bed: 0.3, wheat_young: 0.3, wheat_ripe: 0.3,
-  lever: 0.3, plate: 0.3, door: 0.35, rail: 0.3, portal: 0.5, netherrack: 0.4, lava: 0.3
+  lever: 0.3, plate: 0.3, door: 0.35, rail: 0.3, portal: 0.5, netherrack: 0.4, lava: 0.3, water: 0.2,
+  furnace: 0.35, glass: 0.15, wool: 0.2, stairs: 0.3, slab: 0.3,
+  enchant_table: 0.4, brewing_stand: 0.4, piston: 0.35, hopper: 0.3, nether_brick: 0.35
 };
 const MATERIAL_GRAIN = { wood: 'vertical', planks: 'vertical', door: 'vertical' };
 const blockTextures = {};
@@ -129,6 +174,8 @@ const columnBlocks = new Map();   // "x,z" -> Set of y
 const portalBlocks = new Set();   // "x,y,z" keys of placed portal blocks
 const plateBlocks = new Set();    // "x,y,z" keys of placed pressure plates
 const doorPositions = new Set();  // "x,y,z" keys of doors ever placed (open or closed)
+const pistonPositions = new Set(); // "x,y,z" keys of placed pistons
+const hopperPositions = new Set(); // "x,y,z" keys of placed hoppers
 
 function bkey(x, y, z) { return x + ',' + y + ',' + z; }
 function ckey(x, z) { return x + ',' + z; }
@@ -159,6 +206,8 @@ function addBlockInstance(x, y, z, material, chunkKey) {
   if (material === 'portal') portalBlocks.add(k);
   if (material === 'plate') plateBlocks.add(k);
   if (material === 'door') doorPositions.add(k);
+  if (material === 'piston') pistonPositions.add(k);
+  if (material === 'hopper') hopperPositions.add(k);
 }
 
 function removeBlockInstance(x, y, z) {
@@ -316,6 +365,7 @@ const remotePlayers = new Map(); // id -> { mesh, target }
 const remoteEntities = new Map(); // id -> { mesh, target, kind }
 let dayClock = 0;
 let lastDayClock = 0;
+let isRaining = false;
 let myHealth = 20, myHunger = 20;
 let currentDim = 'overworld';
 let overworldReturnPos = null;
@@ -355,7 +405,10 @@ const ENTITY_LOOKS = {
   skeleton: { body: 0xd8d8c8, head: 0xe8e8d8, scale: 1 },
   boss: { body: 0x3a0d0d, head: 0x5c1414, scale: 1.9 },
   cow: { body: 0x5a3d2b, head: 0xffffff, scale: 1.1 },
-  pig: { body: 0xe8a0a8, head: 0xf0b8c0, scale: 0.9 }
+  pig: { body: 0xe8a0a8, head: 0xf0b8c0, scale: 0.9 },
+  spider: { body: 0x1a1414, head: 0x2a1e1e, scale: 0.85 },
+  enderman: { body: 0x111111, head: 0x8e2de2, scale: 1.6 },
+  villager: { body: 0x8a6a4a, head: 0xd9b98a, scale: 1.05 }
 };
 function makeEntityMesh(kind) {
   const look = ENTITY_LOOKS[kind] || ENTITY_LOOKS.zombie;
@@ -453,6 +506,11 @@ socket.on('respawn', ({ x, y, z, fromNether }) => {
   camera.position.set(x, y, z);
   velocityY = 0;
 });
+socket.on('gameOver', () => {
+  gameOver = true;
+  document.getElementById('gameover-banner').style.display = 'flex';
+  try { controls.unlock(); } catch (e) { /* no-op if not locked */ }
+});
 socket.on('netherArena', ({ edits, spawn }) => {
   unloadAllOverworldChunks();
   for (const key in edits) {
@@ -496,6 +554,7 @@ socket.on('tick', (data) => {
   }
   for (const id of Array.from(remoteEntities.keys())) if (!activeIds.has(id)) removeRemoteEntity(id);
   dayClock = data.dayClock;
+  isRaining = !!data.isRaining;
 });
 
 // ---------- Player controls ----------
@@ -518,6 +577,7 @@ const move = { forward: false, back: false, left: false, right: false, up: false
 const look = { left: false, right: false, up: false, down: false };
 let velocityY = 0;
 let onGround = false;
+let fallPeakY = null;
 const GRAVITY = -20;
 const JUMP_SPEED = 8;
 const MOVE_SPEED = 6;
@@ -563,7 +623,10 @@ const HOTBAR_ORDER = ['dirt', 'stone', 'grass', 'wood', 'leaves', 'planks'];
 const inventory = {
   grass: 0, dirt: 10, stone: 5, wood: 0, leaves: 0, planks: 0, apple: 2, meat: 0,
   bed: 0, bow: 0, rail: 0, lever: 0, plate: 0, door: 0, portal: 1,
-  wheat_seeds: 0, wheat: 0,
+  wheat_seeds: 0, wheat: 0, water: 1, lava: 1,
+  sand: 0, furnace: 0, glass: 0, wool: 0, stairs: 0, slab: 0, cooked_meat: 0,
+  enchant_table: 0, brewing_stand: 0, piston: 0, hopper: 0,
+  potion_speed: 0, potion_strength: 0, fish: 0, carrot: 0, potato: 0, carrot_seeds: 0, potato_seeds: 0,
   tools: { pickaxe: null, axe: null, sword: null }
 };
 let selectedMaterial = 'dirt';
@@ -606,7 +669,15 @@ const RECIPES = [
   { id: 'lever', name: 'Lever (1 stone)', cost: { stone: 1 }, give: { lever: 1 } },
   { id: 'plate', name: 'Pressure Plate (2 planks)', cost: { planks: 2 }, give: { plate: 1 } },
   { id: 'door', name: 'Door (4 planks)', cost: { planks: 4 }, give: { door: 1 } },
-  { id: 'portal', name: 'Portal Block (6 stone)', cost: { stone: 6 }, give: { portal: 1 } }
+  { id: 'portal', name: 'Portal Block (6 stone)', cost: { stone: 6 }, give: { portal: 1 } },
+  { id: 'furnace', name: 'Furnace (5 stone)', cost: { stone: 5 }, give: { furnace: 1 } },
+  { id: 'wool', name: 'Wool (2 leaves)', cost: { leaves: 2 }, give: { wool: 1 } },
+  { id: 'stairs', name: 'Stairs x4 (4 planks)', cost: { planks: 4 }, give: { stairs: 4 } },
+  { id: 'slab', name: 'Slabs x4 (2 planks)', cost: { planks: 2 }, give: { slab: 4 } },
+  { id: 'enchant_table', name: 'Enchant Table (4 stone + 2 wood)', cost: { stone: 4, wood: 2 }, give: { enchant_table: 1 } },
+  { id: 'brewing_stand', name: 'Brewing Stand (2 stone + 1 wood)', cost: { stone: 2, wood: 1 }, give: { brewing_stand: 1 } },
+  { id: 'piston', name: 'Piston (3 stone + 2 wood)', cost: { stone: 3, wood: 2 }, give: { piston: 1 } },
+  { id: 'hopper', name: 'Hopper (5 stone)', cost: { stone: 5 }, give: { hopper: 1 } }
 ];
 let craftMenuOpen = false;
 let craftSelectedIndex = 0;
@@ -630,7 +701,8 @@ function canAfford(recipe) {
   return true;
 }
 
-const HELD_SPECIAL_ITEMS = new Set(['bed', 'lever', 'plate', 'door', 'rail', 'portal', 'bow']);
+const HELD_SPECIAL_ITEMS = new Set(['bed', 'lever', 'plate', 'door', 'rail', 'portal', 'bow',
+  'furnace', 'glass', 'wool', 'stairs', 'slab', 'enchant_table', 'brewing_stand', 'piston', 'hopper']);
 function craftRecipe(recipe) {
   if (!canAfford(recipe)) { showToast("Can't craft that yet"); return; }
   for (const mat in recipe.cost) inventory[mat] -= recipe.cost[mat];
@@ -665,13 +737,63 @@ function toggleCraftMenu() {
   if (craftMenuOpen) renderCraftMenu();
 }
 
+// ---------- Inventory screen ----------
+const ITEM_DISPLAY = {
+  dirt: { name: 'Dirt' }, stone: { name: 'Stone' }, grass: { name: 'Grass' },
+  wood: { name: 'Wood' }, leaves: { name: 'Leaves' }, planks: { name: 'Planks' },
+  apple: { name: 'Apple', color: 0xd94f4f }, meat: { name: 'Raw Meat', color: 0xaa5544 },
+  bed: { name: 'Bed' }, bow: { name: 'Bow', color: 0xd2a679 }, rail: { name: 'Rail' },
+  lever: { name: 'Lever' }, plate: { name: 'Pressure Plate' }, door: { name: 'Door' },
+  portal: { name: 'Portal' }, wheat_seeds: { name: 'Seeds', color: 0xc7d84a }, wheat: { name: 'Wheat' },
+  water: { name: 'Water Bucket' }, lava: { name: 'Lava Bucket' },
+  sand: { name: 'Sand' }, furnace: { name: 'Furnace' }, glass: { name: 'Glass' }, wool: { name: 'Wool' },
+  stairs: { name: 'Stairs' }, slab: { name: 'Slab' }, cooked_meat: { name: 'Cooked Meat', color: 0x8a5a3a },
+  enchant_table: { name: 'Enchant Table' }, brewing_stand: { name: 'Brewing Stand' },
+  piston: { name: 'Piston' }, hopper: { name: 'Hopper' },
+  potion_speed: { name: 'Speed Potion', color: 0x4ad0e0 }, potion_strength: { name: 'Strength Potion', color: 0xc03030 },
+  fish: { name: 'Fish', color: 0x8fb3c9 }, carrot: { name: 'Carrot', color: 0xe08a2b }, potato: { name: 'Potato', color: 0xc9a86a }
+};
+let invScreenOpen = false;
+const invScreenEl = document.getElementById('inv-screen');
+const invGridEl = document.getElementById('inv-grid');
+const invToolsEl = document.getElementById('inv-tools');
+
+function renderInventoryScreen() {
+  invGridEl.innerHTML = '';
+  for (const key in ITEM_DISPLAY) {
+    const info = ITEM_DISPLAY[key];
+    const color = info.color != null ? info.color : (MATERIAL_COLORS[key] != null ? MATERIAL_COLORS[key] : 0x999999);
+    const count = inventory[key] || 0;
+    const cell = document.createElement('div');
+    cell.className = 'inv-cell';
+    cell.style.opacity = count > 0 ? '1' : '0.35';
+    cell.innerHTML = `<span class="inv-count">${count}</span>
+      <span class="swatch" style="background:#${color.toString(16).padStart(6, '0')}"></span>
+      <span class="inv-name">${info.name}</span>`;
+    invGridEl.appendChild(cell);
+  }
+  const t = inventory.tools;
+  invToolsEl.innerHTML = `<span>Pickaxe: ${t.pickaxe || 'none'}</span><span>Axe: ${t.axe || 'none'}</span><span>Sword: ${t.sword || 'none'}</span>`;
+}
+
+function toggleInventoryScreen() {
+  invScreenOpen = !invScreenOpen;
+  invScreenEl.style.display = invScreenOpen ? 'flex' : 'none';
+  if (invScreenOpen) renderInventoryScreen();
+}
+
 const STARTER_KEYS = new Set(['KeyW', 'KeyA', 'KeyS', 'KeyD', 'Space', 'Enter',
   'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight']);
 
 function eatFood() {
-  if (inventory.meat >= 1) { inventory.meat -= 1; socket.emit('eat', { amount: 10 }); showToast('Ate meat'); }
+  if (inventory.cooked_meat >= 1) { inventory.cooked_meat -= 1; socket.emit('eat', { amount: 14 }); showToast('Ate cooked meat'); }
+  else if (inventory.fish >= 1) { inventory.fish -= 1; socket.emit('eat', { amount: 8 }); showToast('Ate fish'); }
+  else if (inventory.meat >= 1) { inventory.meat -= 1; socket.emit('eat', { amount: 10 }); showToast('Ate raw meat'); }
+  else if (inventory.carrot >= 1) { inventory.carrot -= 1; socket.emit('eat', { amount: 5 }); showToast('Ate carrot'); }
+  else if (inventory.potato >= 1) { inventory.potato -= 1; socket.emit('eat', { amount: 5 }); showToast('Ate potato'); }
   else if (inventory.apple >= 1) { inventory.apple -= 1; socket.emit('eat', { amount: 6 }); showToast('Ate apple'); }
   else { showToast('No food to eat'); return; }
+  renderHotbar();
   document.getElementById('apple-count').textContent =
     `Apples: ${inventory.apple} | Meat: ${inventory.meat} (F to eat)`;
 }
@@ -686,6 +808,10 @@ document.addEventListener('keydown', (e) => {
     else if (e.code === 'KeyE' || e.code === 'Escape') { toggleCraftMenu(); }
     return;
   }
+  if (invScreenOpen) {
+    if (e.code === 'KeyX' || e.code === 'Escape') toggleInventoryScreen();
+    return;
+  }
 
   switch (e.code) {
     case 'KeyW': move.forward = true; break;
@@ -697,7 +823,7 @@ document.addEventListener('keydown', (e) => {
     case 'ArrowUp': look.up = true; break;
     case 'ArrowDown': look.down = true; break;
     case 'Space':
-      if (creativeMode) move.up = true;
+      if (creativeMode || spectatorMode) move.up = true;
       else if (onGround) { velocityY = JUMP_SPEED; onGround = false; }
       break;
     case 'ShiftLeft': move.down = true; break;
@@ -709,14 +835,27 @@ document.addEventListener('keydown', (e) => {
     case 'Digit7':
       if (inventory.wheat_seeds > 0) { heldSpecial = 'wheat_seeds'; renderHotbar(); showToast('Holding wheat seeds'); }
       break;
+    case 'Digit8':
+      if (inventory.water > 0) { heldSpecial = 'water'; renderHotbar(); showToast('Holding water bucket'); }
+      break;
+    case 'Digit9':
+      if (inventory.lava > 0) { heldSpecial = 'lava'; renderHotbar(); showToast('Holding lava bucket'); }
+      break;
     case 'KeyE': toggleCraftMenu(); break;
+    case 'KeyX': toggleInventoryScreen(); break;
     case 'KeyF': eatFood(); break;
     case 'KeyB': breedNearby(); break;
     case 'KeyN': sleepInBed(); break;
     case 'KeyG': toggleCreative(); break;
+    case 'KeyP': toggleHardcore(); break;
+    case 'KeyO': toggleSpectator(); break;
     case 'KeyR': toggleRide(); break;
-    case 'KeyJ': if (gameStarted) breakOrAttack(); break;
-    case 'KeyK': if (gameStarted) placeBlock(); break;
+    case 'KeyC': useNearbyBlock(); break;
+    case 'KeyV': drinkPotion(); break;
+    case 'KeyT': tradeWithVillager(); break;
+    case 'KeyH': goFishing(); break;
+    case 'KeyJ': if (gameStarted && !spectatorMode && !gameOver) breakOrAttack(); break;
+    case 'KeyK': if (gameStarted && !spectatorMode && !gameOver) placeBlock(); break;
   }
 });
 document.addEventListener('keyup', (e) => {
@@ -751,7 +890,9 @@ function breakOrAttack() {
     const hitGroup = findEntityGroup(entityHits[0].object);
     const entityId = hitGroup && hitGroup.userData.entityId;
     if (entityId) {
-      const dmg = SWORD_DAMAGE[inventory.tools.sword || 'none'];
+      let dmg = SWORD_DAMAGE[inventory.tools.sword || 'none'];
+      if (inventory.tools.swordEnchanted) dmg += TOOL_ENCHANT_BONUS.sword;
+      if (performance.now() < strengthBuffUntil) dmg += 3;
       socket.emit('attackEntity', { entityId, damage: dmg });
       unlockAchievement('first_attack', 'Fighter');
       return;
@@ -765,7 +906,7 @@ function breakOrAttack() {
   const pos = meshUserData[material].positions[hit.instanceId];
   if (!pos || UNBREAKABLE.has(material)) return;
 
-  if (material === 'lever' || material === 'plate') { toggleNearestDoor(pos); return; }
+  if (material === 'lever' || material === 'plate') { activateNearestMechanism(pos); return; }
   if (material === 'stone' && !inventory.tools.pickaxe) { showToast('Need a pickaxe to mine stone'); return; }
 
   removeBlockInstance(pos.x, pos.y, pos.z);
@@ -780,7 +921,12 @@ function breakOrAttack() {
     inventory[material] = (inventory[material] || 0) + 1;
   }
   if (material === 'leaves' && Math.random() < 0.25) inventory.apple = (inventory.apple || 0) + 1;
-  if (material === 'grass' && Math.random() < 0.3) inventory.wheat_seeds = (inventory.wheat_seeds || 0) + 1;
+  if (material === 'grass') {
+    const roll = Math.random();
+    if (roll < 0.3) inventory.wheat_seeds = (inventory.wheat_seeds || 0) + 1;
+    else if (roll < 0.38) { inventory.carrot = (inventory.carrot || 0) + 1; unlockAchievement('first_carrot', 'Root Vegetables'); }
+    else if (roll < 0.46) { inventory.potato = (inventory.potato || 0) + 1; unlockAchievement('first_carrot', 'Root Vegetables'); }
+  }
   renderHotbar();
   document.getElementById('apple-count').textContent = `Apples: ${inventory.apple} | Meat: ${inventory.meat} (F to eat)`;
   socket.emit('blockEdit', { x: pos.x, y: pos.y, z: pos.z, action: 'remove' });
@@ -817,11 +963,55 @@ function placeBlock() {
 
   if (placeMaterial === 'portal') portalCooldownUntil = Math.max(portalCooldownUntil, performance.now());
   if (placeMaterial === 'wheat_young') unlockAchievement('first_plant', 'Farmer');
+  if (placeMaterial === 'water' || placeMaterial === 'lava') {
+    spreadFluid(nx, ny, nz, placeMaterial);
+    unlockAchievement('first_fluid', 'Plumber');
+  }
   unlockAchievement('first_place', 'Builder');
 }
 
+// Simple one-shot flood-fill spread (not a continuous simulation) - falls
+// first, then spreads sideways up to a material-specific distance.
+function spreadFluid(sx, sy, sz, material) {
+  const maxDist = material === 'lava' ? 3 : 6;
+  const maxPlaced = 40;
+  const visited = new Set([bkey(sx, sy, sz)]);
+  const queue = [{ x: sx, y: sy, z: sz, dist: 0 }];
+  let placed = 0;
+  while (queue.length && placed < maxPlaced) {
+    const cur = queue.shift();
+    const downKey = bkey(cur.x, cur.y - 1, cur.z);
+    if (!blockAt.has(downKey) && !visited.has(downKey)) {
+      visited.add(downKey);
+      placeFluidCell(cur.x, cur.y - 1, cur.z, material);
+      placed++;
+      queue.push({ x: cur.x, y: cur.y - 1, z: cur.z, dist: 0 });
+      continue;
+    }
+    if (cur.dist >= maxDist) continue;
+    for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+      const nx = cur.x + dx, nz = cur.z + dz;
+      const k = bkey(nx, cur.y, nz);
+      if (!blockAt.has(k) && !visited.has(k)) {
+        visited.add(k);
+        placeFluidCell(nx, cur.y, nz, material);
+        placed++;
+        queue.push({ x: nx, y: cur.y, z: nz, dist: cur.dist + 1 });
+      }
+    }
+  }
+}
+function placeFluidCell(x, y, z, material) {
+  const chunkKey = currentDim === 'nether' ? 'nether,nether' : (() => {
+    const [cx, cz] = World.worldToChunk(x, z);
+    return cx + ',' + cz;
+  })();
+  addBlockInstance(x, y, z, material, chunkKey);
+  socket.emit('blockEdit', { x, y, z, action: 'add', material });
+}
+
 document.addEventListener('mousedown', (e) => {
-  if (!gameStarted || craftMenuOpen) return;
+  if (!gameStarted || craftMenuOpen || invScreenOpen || spectatorMode || gameOver) return;
   if (e.button === 0) breakOrAttack();
   else if (e.button === 2) placeBlock();
 });
@@ -856,6 +1046,16 @@ function findNearestDoorPosition(originX, originY, originZ, radius) {
   return best;
 }
 
+function findNearestPositionIn(set, originX, originY, originZ, radius) {
+  let best = null, bestDist = Infinity;
+  for (const key of set) {
+    const [dx, dy, dz] = key.split(',').map(Number);
+    const d = (dx - originX) ** 2 + (dy - originY) ** 2 + (dz - originZ) ** 2;
+    if (d < bestDist && d <= radius * radius) { bestDist = d; best = { x: dx, y: dy, z: dz }; }
+  }
+  return best;
+}
+
 function toggleNearestDoor(fromPos) {
   const door = findNearestDoorPosition(fromPos.x, fromPos.y, fromPos.z, 3);
   if (!door) { showToast('No door nearby'); return; }
@@ -874,12 +1074,136 @@ function toggleNearestDoor(fromPos) {
   }
 }
 
+function activatePiston(pistonPos) {
+  const fromKey = bkey(pistonPos.x + 1, pistonPos.y, pistonPos.z);
+  const toKey = bkey(pistonPos.x + 2, pistonPos.y, pistonPos.z);
+  const entry = blockAt.get(fromKey);
+  if (!entry || UNBREAKABLE.has(entry.material)) { showToast('Nothing to push'); return; }
+  if (blockAt.has(toKey)) { showToast('Piston is blocked'); return; }
+  const material = entry.material;
+  removeBlockInstance(pistonPos.x + 1, pistonPos.y, pistonPos.z);
+  socket.emit('blockEdit', { x: pistonPos.x + 1, y: pistonPos.y, z: pistonPos.z, action: 'remove' });
+  const chunkKey = currentDim === 'nether' ? 'nether,nether' : (() => {
+    const [cx, cz] = World.worldToChunk(pistonPos.x + 2, pistonPos.z);
+    return cx + ',' + cz;
+  })();
+  addBlockInstance(pistonPos.x + 2, pistonPos.y, pistonPos.z, material, chunkKey);
+  socket.emit('blockEdit', { x: pistonPos.x + 2, y: pistonPos.y, z: pistonPos.z, action: 'add', material });
+  showToast('Piston pushed a block (pushes toward +X)');
+  unlockAchievement('first_piston', 'Redstone Engineer');
+}
+
+function activateNearestMechanism(fromPos) {
+  const door = findNearestDoorPosition(fromPos.x, fromPos.y, fromPos.z, 3);
+  const piston = findNearestPositionIn(pistonPositions, fromPos.x, fromPos.y, fromPos.z, 3);
+  if (door && piston) {
+    const dd = (door.x - fromPos.x) ** 2 + (door.y - fromPos.y) ** 2 + (door.z - fromPos.z) ** 2;
+    const pd = (piston.x - fromPos.x) ** 2 + (piston.y - fromPos.y) ** 2 + (piston.z - fromPos.z) ** 2;
+    if (dd <= pd) toggleNearestDoor(fromPos); else activatePiston(piston);
+  } else if (door) {
+    toggleNearestDoor(fromPos);
+  } else if (piston) {
+    activatePiston(piston);
+  } else {
+    showToast('No door or piston nearby');
+  }
+}
+
 function sleepInBed() {
   const bed = findNearbyBlockOfType('bed', 4);
   if (!bed) { showToast('No bed nearby'); return; }
   socket.emit('setBedSpawn', bed);
   socket.emit('sleep');
   showToast('Zzz... spawn set to bed');
+}
+
+const TOOL_ENCHANT_BONUS = { sword: 3 };
+function useNearbyBlock() {
+  if (findNearbyBlockOfType('furnace', 3)) { smeltAtFurnace(); return; }
+  if (findNearbyBlockOfType('enchant_table', 3)) { enchantTool(); return; }
+  if (findNearbyBlockOfType('brewing_stand', 3)) { brewPotion(); return; }
+  showToast('No furnace, enchant table, or brewing stand nearby');
+}
+
+function smeltAtFurnace() {
+  if (inventory.sand > 0) {
+    inventory.sand -= 1;
+    inventory.glass = (inventory.glass || 0) + 1;
+    showToast('Smelted sand into glass');
+  } else if (inventory.meat > 0) {
+    inventory.meat -= 1;
+    inventory.cooked_meat = (inventory.cooked_meat || 0) + 1;
+    showToast('Cooked meat');
+  } else {
+    showToast('Nothing to smelt (need sand or raw meat)');
+    return;
+  }
+  renderHotbar();
+  unlockAchievement('first_smelt', 'Smelter');
+}
+
+function enchantTool() {
+  if (inventory.tools.sword && !inventory.tools.swordEnchanted && inventory.wheat >= 3) {
+    inventory.wheat -= 3;
+    inventory.tools.swordEnchanted = true;
+    renderHotbar();
+    showToast('Sword enchanted! +3 damage');
+    unlockAchievement('first_enchant', 'Enchanter');
+  } else if (!inventory.tools.sword) {
+    showToast('Need a sword to enchant');
+  } else if (inventory.tools.swordEnchanted) {
+    showToast('Sword is already enchanted');
+  } else {
+    showToast('Need 3 wheat to pay for enchanting');
+  }
+}
+
+function brewPotion() {
+  if (inventory.apple >= 2) {
+    inventory.apple -= 2;
+    inventory.potion_speed = (inventory.potion_speed || 0) + 1;
+    showToast('Brewed a Speed Potion');
+  } else if (inventory.meat >= 2 || inventory.cooked_meat >= 1) {
+    if (inventory.cooked_meat >= 1) inventory.cooked_meat -= 1; else inventory.meat -= 2;
+    inventory.potion_strength = (inventory.potion_strength || 0) + 1;
+    showToast('Brewed a Strength Potion');
+  } else {
+    showToast('Need 2 apples (speed) or meat (strength) to brew');
+    return;
+  }
+  renderHotbar();
+  unlockAchievement('first_brew', 'Brewer');
+}
+
+let speedBuffUntil = 0;
+let strengthBuffUntil = 0;
+function drinkPotion() {
+  if (inventory.potion_speed > 0) {
+    inventory.potion_speed -= 1;
+    speedBuffUntil = performance.now() + 20000;
+    showToast('Speed boost! (20s)');
+  } else if (inventory.potion_strength > 0) {
+    inventory.potion_strength -= 1;
+    strengthBuffUntil = performance.now() + 20000;
+    showToast('Strength boost! (20s)');
+  } else {
+    showToast('No potions to drink');
+    return;
+  }
+  renderHotbar();
+}
+
+function goFishing() {
+  const water = findNearbyBlockOfType('water', 4);
+  if (!water) { showToast('No water nearby to fish in'); return; }
+  if (Math.random() < 0.5) {
+    inventory.fish = (inventory.fish || 0) + 1;
+    renderHotbar();
+    showToast('Caught a fish!');
+    unlockAchievement('first_fish', 'Angler');
+  } else {
+    showToast('Nothing bit...');
+  }
 }
 
 function breedNearby() {
@@ -898,12 +1222,48 @@ function breedNearby() {
   unlockAchievement('first_breed', 'Animal Whisperer');
 }
 
+const TRADE_REWARDS = [
+  () => ({ item: 'stone', amount: 5 }),
+  () => ({ item: 'planks', amount: 4 }),
+  () => ({ item: 'apple', amount: 2 }),
+  () => ({ item: 'meat', amount: 2 })
+];
+function tradeWithVillager() {
+  const villager = Array.from(remoteEntities.values()).find((re) =>
+    re.kind === 'villager' && re.mesh.position.distanceTo(camera.position) < 5
+  );
+  if (!villager) { showToast('No villager nearby'); return; }
+  if ((inventory.wheat || 0) < 5) { showToast('Villager wants 5 wheat to trade'); return; }
+  inventory.wheat -= 5;
+  const reward = TRADE_REWARDS[Math.floor(Math.random() * TRADE_REWARDS.length)]();
+  inventory[reward.item] = (inventory[reward.item] || 0) + reward.amount;
+  renderHotbar();
+  showToast(`Traded 5 wheat for ${reward.amount} ${reward.item}`);
+  unlockAchievement('first_trade', 'Trader');
+}
+
 let creativeMode = false;
 function toggleCreative() {
   creativeMode = !creativeMode;
   velocityY = 0;
   showToast(creativeMode ? 'Creative mode ON (unlimited blocks + flight)' : 'Creative mode OFF');
 }
+
+let hardcoreMode = false;
+function toggleHardcore() {
+  hardcoreMode = !hardcoreMode;
+  socket.emit('setHardcore', { hardcore: hardcoreMode });
+  showToast(hardcoreMode ? 'HARDCORE ON - death is permanent!' : 'Hardcore mode off');
+}
+
+let spectatorMode = false;
+function toggleSpectator() {
+  spectatorMode = !spectatorMode;
+  velocityY = 0;
+  showToast(spectatorMode ? 'Spectator mode ON (fly through blocks, no interaction)' : 'Spectator mode off');
+}
+
+let gameOver = false;
 
 let riding = false;
 function toggleRide() {
@@ -939,7 +1299,46 @@ function checkPressurePlate() {
   if (plateBlocks.has(feetKey)) {
     plateTriggerCooldownUntil = performance.now() + 2500;
     const [px, py, pz] = feetKey.split(',').map(Number);
-    toggleNearestDoor({ x: px, y: py, z: pz });
+    activateNearestMechanism({ x: px, y: py, z: pz });
+  }
+}
+
+let lavaDamageCooldownUntil = 0;
+function checkLavaContact() {
+  if (!gameStarted || creativeMode || performance.now() < lavaDamageCooldownUntil) return;
+  const feetKey = bkey(Math.round(camera.position.x), Math.round(camera.position.y - EYE_HEIGHT), Math.round(camera.position.z));
+  const entry = blockAt.get(feetKey);
+  if (entry && entry.material === 'lava') {
+    lavaDamageCooldownUntil = performance.now() + 1000;
+    socket.emit('takeDamage', { amount: 4 });
+    showToast('Ouch! Lava!');
+  }
+}
+
+let hopperCheckCooldownUntil = 0;
+function checkHopperAutoHarvest() {
+  if (!gameStarted || hopperPositions.size === 0 || performance.now() < hopperCheckCooldownUntil) return;
+  hopperCheckCooldownUntil = performance.now() + 3000;
+  for (const key of hopperPositions) {
+    const [hx, hy, hz] = key.split(',').map(Number);
+    if ((hx - camera.position.x) ** 2 + (hz - camera.position.z) ** 2 > 64) continue; // must be within ~8 blocks
+    for (let dx = -2; dx <= 2; dx++) {
+      for (let dz = -2; dz <= 2; dz++) {
+        for (let dy = -1; dy <= 2; dy++) {
+          const entry = blockAt.get(bkey(hx + dx, hy + dy, hz + dz));
+          if (entry && entry.material === 'wheat_ripe') {
+            removeBlockInstance(hx + dx, hy + dy, hz + dz);
+            socket.emit('blockEdit', { x: hx + dx, y: hy + dy, z: hz + dz, action: 'remove' });
+            inventory.wheat = (inventory.wheat || 0) + 1;
+            inventory.wheat_seeds = (inventory.wheat_seeds || 0) + 1;
+            renderHotbar();
+            showToast('Hopper collected wheat');
+            unlockAchievement('first_hopper', 'Automation');
+            return;
+          }
+        }
+      }
+    }
   }
 }
 
@@ -970,15 +1369,31 @@ const clock = new THREE.Clock();
 function animate() {
   requestAnimationFrame(animate);
   const dt = Math.min(clock.getDelta(), 0.1);
+  const menusOpen = craftMenuOpen || invScreenOpen || gameOver;
 
-  if (!craftMenuOpen) {
+  if (!menusOpen) {
     if (look.left) camera.rotation.y += TURN_SPEED * dt;
     if (look.right) camera.rotation.y -= TURN_SPEED * dt;
     if (look.up) camera.rotation.x = Math.min(Math.PI / 2 - 0.05, camera.rotation.x + TURN_SPEED * 0.8 * dt);
     if (look.down) camera.rotation.x = Math.max(-(Math.PI / 2 - 0.05), camera.rotation.x - TURN_SPEED * 0.8 * dt);
   }
 
-  if (gameStarted && !craftMenuOpen && riding) {
+  if (gameStarted && !menusOpen && spectatorMode) {
+    const dir = new THREE.Vector3();
+    camera.getWorldDirection(dir);
+    dir.y = 0; dir.normalize();
+    const right = new THREE.Vector3().crossVectors(dir, camera.up).normalize();
+    const step = new THREE.Vector3();
+    if (move.forward) step.add(dir);
+    if (move.back) step.sub(dir);
+    if (move.right) step.add(right);
+    if (move.left) step.sub(right);
+    if (step.lengthSq() > 0) step.normalize().multiplyScalar(FLY_SPEED * dt);
+    camera.position.x += step.x;
+    camera.position.z += step.z;
+    if (move.up) camera.position.y += FLY_SPEED * dt;
+    if (move.down) camera.position.y -= FLY_SPEED * dt;
+  } else if (gameStarted && !menusOpen && riding) {
     const dir = new THREE.Vector3();
     camera.getWorldDirection(dir);
     dir.y = 0; dir.normalize();
@@ -987,7 +1402,7 @@ function animate() {
     const nextRail = blockAt.get(bkey(Math.round(nx), Math.round(camera.position.y - EYE_HEIGHT - 0.5), Math.round(nz)));
     if (nextRail && nextRail.material === 'rail') { camera.position.x = nx; camera.position.z = nz; }
     else { riding = false; showToast('End of track'); }
-  } else if (gameStarted && !craftMenuOpen && creativeMode) {
+  } else if (gameStarted && !menusOpen && creativeMode) {
     const dir = new THREE.Vector3();
     camera.getWorldDirection(dir);
     dir.y = 0; dir.normalize();
@@ -997,12 +1412,13 @@ function animate() {
     if (move.back) step.sub(dir);
     if (move.right) step.add(right);
     if (move.left) step.sub(right);
-    if (step.lengthSq() > 0) step.normalize().multiplyScalar(MOVE_SPEED * dt);
+    const effSpeed = MOVE_SPEED * (performance.now() < speedBuffUntil ? 1.6 : 1);
+    if (step.lengthSq() > 0) step.normalize().multiplyScalar(effSpeed * dt);
     camera.position.x += step.x;
     camera.position.z += step.z;
     if (move.up) camera.position.y += FLY_SPEED * dt;
     if (move.down) camera.position.y -= FLY_SPEED * dt;
-  } else if (gameStarted && !craftMenuOpen) {
+  } else if (gameStarted && !menusOpen) {
     const dir = new THREE.Vector3();
     camera.getWorldDirection(dir);
     dir.y = 0; dir.normalize();
@@ -1013,7 +1429,8 @@ function animate() {
     if (move.back) step.sub(dir);
     if (move.right) step.add(right);
     if (move.left) step.sub(right);
-    if (step.lengthSq() > 0) step.normalize().multiplyScalar(MOVE_SPEED * dt);
+    const effSpeed = MOVE_SPEED * (performance.now() < speedBuffUntil ? 1.6 : 1);
+    if (step.lengthSq() > 0) step.normalize().multiplyScalar(effSpeed * dt);
 
     const tryX = camera.position.x + step.x;
     if (canStandAt(tryX, camera.position.y, camera.position.z)) {
@@ -1030,6 +1447,8 @@ function animate() {
       camera.position.y += STEP_HEIGHT;
     }
 
+    if (!onGround) fallPeakY = fallPeakY === null ? camera.position.y : Math.max(fallPeakY, camera.position.y);
+
     velocityY += GRAVITY * dt;
     const tryY = camera.position.y + velocityY * dt;
     const feetY = camera.position.y - EYE_HEIGHT;
@@ -1038,6 +1457,14 @@ function animate() {
       const ground = groundHeightBelow(camera.position.x, camera.position.z, feetY);
       const feetLevel = (ground === -Infinity ? World.BEDROCK_Y - 1 : ground) + 0.5 + EYE_HEIGHT;
       if (tryY <= feetLevel) {
+        if (!onGround && fallPeakY !== null && !creativeMode) {
+          const fallDistance = fallPeakY - feetLevel;
+          if (fallDistance > 4) {
+            socket.emit('takeDamage', { amount: Math.round((fallDistance - 4) * 2) });
+            showToast('Ouch! That fall hurt');
+          }
+        }
+        fallPeakY = null;
         camera.position.y = feetLevel;
         velocityY = 0;
         onGround = true;
@@ -1057,6 +1484,8 @@ function animate() {
   if (currentDim === 'overworld') updateChunks();
   checkPortalProximity();
   checkPressurePlate();
+  checkLavaContact();
+  checkHopperAutoHarvest();
 
   for (const [, rp] of remotePlayers) {
     rp.mesh.position.lerp(new THREE.Vector3(rp.target.x, rp.target.y - 0.9, rp.target.z), 0.25);
@@ -1068,6 +1497,8 @@ function animate() {
 
   if (lastDayClock > 0.9 && dayClock < 0.1 && myHealth > 0) unlockAchievement('survived_night', 'Survived the Night');
   lastDayClock = dayClock;
+
+  updateWeather(dt);
 
   // day/night visuals
   const fade = 0.05;

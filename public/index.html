@@ -51,6 +51,12 @@
     position: fixed; inset: 0; display: none; align-items: center; justify-content: center;
     color: #ff5555; font-size: 42px; font-weight: bold; background: rgba(0,0,0,0.4); z-index: 15; pointer-events: none;
   }
+  #gameover-banner {
+    position: fixed; inset: 0; display: none; flex-direction: column; align-items: center; justify-content: center;
+    color: #ff3030; font-size: 48px; font-weight: bold; background: rgba(0,0,0,0.75); z-index: 30; pointer-events: none;
+    text-align: center; gap: 10px;
+  }
+  #gameover-banner span { font-size: 16px; color: white; font-weight: normal; }
   #toast-container {
     position: fixed; top: 70px; left: 50%; transform: translateX(-50%);
     display: flex; flex-direction: column; gap: 6px; align-items: center; pointer-events: none; z-index: 25;
@@ -72,16 +78,39 @@
   .recipe .name { font-size: 13px; }
   .recipe .cost { font-size: 11px; opacity: 0.7; }
   #craft-hint { font-size: 11px; opacity: 0.7; text-align: center; margin-top: 6px; }
+  #inv-screen {
+    position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%);
+    display: none; flex-direction: column; gap: 8px; background: rgba(15,15,15,0.92);
+    border: 2px solid rgba(255,255,255,0.3); border-radius: 8px; padding: 16px; color: white;
+    min-width: 380px; max-width: 480px; z-index: 22;
+  }
+  #inv-screen h2 { margin: 0 0 4px 0; font-size: 16px; text-align: center; }
+  #inv-grid { display: grid; grid-template-columns: repeat(6, 1fr); gap: 8px; }
+  .inv-cell {
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    background: rgba(255,255,255,0.06); border-radius: 6px; padding: 6px 2px; min-height: 54px;
+  }
+  .inv-cell .swatch { width: 22px; height: 22px; margin-top: 0; }
+  .inv-cell .inv-name { font-size: 9px; opacity: 0.85; margin-top: 3px; text-align: center; }
+  .inv-cell .inv-count { font-size: 12px; font-weight: bold; }
+  #inv-tools { display: flex; justify-content: space-around; font-size: 12px; margin-top: 4px; }
+  #inv-hint { font-size: 11px; opacity: 0.7; text-align: center; margin-top: 4px; }
 </style>
 </head>
 <body>
 <div id="crosshair"></div>
-<div id="hint">WASD move &middot; Look: mouse/arrows &middot; Space jump &middot; J break/attack &middot; K place/plant/shoot &middot; 1-6 hotbar &middot; E crafting &middot; F eat &middot; B breed &middot; N sleep &middot; R ride cart &middot; G creative</div>
+<div id="hint">WASD move &middot; Look: mouse/arrows &middot; Space jump &middot; J break/attack &middot; K place/plant/shoot &middot; 1-6 hotbar &middot; E crafting &middot; X inventory &middot; F eat &middot; B breed &middot; N sleep &middot; R ride cart &middot; G creative</div>
 <div id="toast-container"></div>
 <div id="craft-menu">
   <h2>Crafting</h2>
   <div id="recipe-list"></div>
   <div id="craft-hint">Up/Down or mouse to select &middot; Enter/click to craft &middot; E to close</div>
+</div>
+<div id="inv-screen">
+  <h2>Inventory</h2>
+  <div id="inv-grid"></div>
+  <div id="inv-tools"></div>
+  <div id="inv-hint">X to close</div>
 </div>
 <div id="stats">
   <div class="bar-label"><span>Health</span></div>
@@ -92,6 +121,7 @@
 </div>
 <div id="players-online">Players online: 1</div>
 <div id="dead-banner">You died — respawning...</div>
+<div id="gameover-banner">GAME OVER<span>Hardcore mode: this world ends here for you.</span></div>
 <div id="hotbar"></div>
 <div id="instructions">
   <div>

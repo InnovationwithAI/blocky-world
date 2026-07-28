@@ -23,11 +23,14 @@ let sleepOffsetMs = 0;
 function getDayClock() { return (((Date.now() - startTime + sleepOffsetMs) % DAY_LENGTH) + DAY_LENGTH) % DAY_LENGTH / DAY_LENGTH; }
 function isNight() { const t = getDayClock(); return t > 0.5 && t < 0.95; }
 
+let isRaining = false;
+setInterval(() => { isRaining = Math.random() < 0.35; }, 90 * 1000);
+
 const COLORS = [0xff5555, 0x5588ff, 0xffaa00, 0x55ff88, 0xcc55ff, 0x55ffff];
 let colorIdx = 0;
 let entityIdCounter = 1;
 
-const HOSTILE_KINDS = new Set(['zombie', 'skeleton', 'boss']);
+const HOSTILE_KINDS = new Set(['zombie', 'skeleton', 'boss', 'spider', 'enderman']);
 const CROP_GROWTH_MS = 45 * 1000;
 
 function randomSpawn() {
@@ -64,7 +67,24 @@ function buildNetherArena() {
     }
   }
   put(-6, 1, 0, 'portal'); // return portal to overworld
-  entities['boss1'] = { kind: 'boss', x: 4, y: 1.5, z: 4, health: 60, dim: 'nether' };
+
+  // small fortress structure around the boss, built from nether brick
+  const fx = 4, fz = 4, fSize = 4;
+  for (let x = fx - fSize; x <= fx + fSize; x++) {
+    for (let z = fz - fSize; z <= fz + fSize; z++) {
+      const onEdge = Math.abs(x - fx) === fSize || Math.abs(z - fz) === fSize;
+      if (onEdge) {
+        put(x, 1, z, 'nether_brick');
+        put(x, 2, z, 'nether_brick');
+        put(x, 3, z, 'nether_brick');
+      }
+    }
+  }
+  // gaps for an entrance
+  delete chunkEdits[NETHER_KEY][(fx - fSize) + ',1,' + fz];
+  delete chunkEdits[NETHER_KEY][(fx - fSize) + ',2,' + fz];
+
+  entities['boss1'] = { kind: 'boss', x: fx, y: 1.5, z: fz, health: 60, dim: 'nether' };
 }
 
 io.on('connection', (socket) => {
@@ -183,6 +203,18 @@ io.on('connection', (socket) => {
     p.hunger = Math.min(20, p.hunger + (amount || 6));
   });
 
+  socket.on('takeDamage', ({ amount }) => {
+    const p = players[socket.id];
+    if (!p) return;
+    p.health = Math.max(0, p.health - (amount || 1));
+  });
+
+  socket.on('setHardcore', ({ hardcore }) => {
+    const p = players[socket.id];
+    if (!p) return;
+    p.hardcore = !!hardcore;
+  });
+
   socket.on('disconnect', () => {
     delete players[socket.id];
     io.emit('playerLeft', { id: socket.id });
@@ -206,8 +238,9 @@ setInterval(() => {
     const mx = target.x + Math.cos(angle) * dist;
     const mz = target.z + Math.sin(angle) * dist;
     const h = World.heightAt(Math.round(mx), Math.round(mz));
-    const kind = Math.random() < 0.5 ? 'zombie' : 'skeleton';
-    entities['e' + (entityIdCounter++)] = { kind, x: mx, y: h + 1.5, z: mz, health: 20, dim: 'overworld' };
+    const roll = Math.random();
+    const kind = roll < 0.4 ? 'zombie' : roll < 0.7 ? 'skeleton' : roll < 0.9 ? 'spider' : 'enderman';
+    entities['e' + (entityIdCounter++)] = { kind, x: mx, y: h + 1.5, z: mz, health: kind === 'spider' ? 12 : 20, dim: 'overworld' };
   }
   if (!night) {
     for (const id in entities) if (entities[id].dim === 'overworld' && HOSTILE_KINDS.has(entities[id].kind)) delete entities[id];
@@ -226,6 +259,18 @@ setInterval(() => {
     entities['e' + (entityIdCounter++)] = { kind, x: mx, y: h + 1.5, z: mz, health: 10, dim: 'overworld', wanderT: 0 };
   }
 
+  // villager spawn (overworld, rare, small cap)
+  const villagerCount = Object.values(entities).filter((e) => e.kind === 'villager').length;
+  if (overworldPlayers.length > 0 && villagerCount < overworldPlayers.length * 2 && Math.random() < 0.015) {
+    const [, target] = overworldPlayers[Math.floor(Math.random() * overworldPlayers.length)];
+    const angle = Math.random() * Math.PI * 2;
+    const dist = 8 + Math.random() * 10;
+    const mx = target.x + Math.cos(angle) * dist;
+    const mz = target.z + Math.sin(angle) * dist;
+    const h = World.heightAt(Math.round(mx), Math.round(mz));
+    entities['e' + (entityIdCounter++)] = { kind: 'villager', x: mx, y: h + 1.5, z: mz, health: 30, dim: 'overworld' };
+  }
+
   // entity AI
   for (const id in entities) {
     const ent = entities[id];
@@ -237,20 +282,34 @@ setInterval(() => {
         if (d < nd) { nd = d; nearest = p; }
       }
       if (nearest) {
-        const dx = nearest.x - ent.x, dz = nearest.z - ent.z;
-        const len = Math.hypot(dx, dz) || 1;
-        const isRanged = ent.kind === 'skeleton';
-        const keepDistance = isRanged ? 6 : 0;
-        const speed = (ent.kind === 'boss' ? 1.6 : 1.2) * (TICK_MS / 1000);
-        if (len > keepDistance + 1) {
-          ent.x += (dx / len) * speed;
-          ent.z += (dz / len) * speed;
+        if (ent.kind === 'enderman') {
+          ent.teleportT = (ent.teleportT || 0) - TICK_MS;
+          if (ent.teleportT <= 0) {
+            ent.teleportT = 3000 + Math.random() * 2000;
+            const angle = Math.random() * Math.PI * 2;
+            const dist = 2 + Math.random() * 3;
+            ent.x = nearest.x + Math.cos(angle) * dist;
+            ent.z = nearest.z + Math.sin(angle) * dist;
+            if (ent.dim === 'overworld') ent.y = World.heightAt(Math.round(ent.x), Math.round(ent.z)) + 1.5;
+          }
+        } else {
+          const dx = nearest.x - ent.x, dz = nearest.z - ent.z;
+          const len = Math.hypot(dx, dz) || 1;
+          const isRanged = ent.kind === 'skeleton';
+          const keepDistance = isRanged ? 6 : 0;
+          const speed = (ent.kind === 'boss' ? 1.6 : ent.kind === 'spider' ? 1.8 : 1.2) * (TICK_MS / 1000);
+          if (len > keepDistance + 1) {
+            ent.x += (dx / len) * speed;
+            ent.z += (dz / len) * speed;
+          }
+          if (ent.dim === 'overworld') ent.y = World.heightAt(Math.round(ent.x), Math.round(ent.z)) + 1.5;
         }
-        if (ent.dim === 'overworld') ent.y = World.heightAt(Math.round(ent.x), Math.round(ent.z)) + 1.5;
+        const dx2 = nearest.x - ent.x, dz2 = nearest.z - ent.z;
+        const nd2 = dx2 * dx2 + dz2 * dz2;
         const dmg = ent.kind === 'boss' ? 4 : 1;
-        const range = isRanged ? 7 * 7 : 2.25;
-        const cooldown = isRanged ? 2200 : 1800;
-        if (len * len < range && (!ent.lastHit || Date.now() - ent.lastHit > cooldown)) {
+        const range = ent.kind === 'skeleton' ? 49 : 2.25;
+        const cooldown = ent.kind === 'skeleton' ? 2200 : 1800;
+        if (nd2 < range && (!ent.lastHit || Date.now() - ent.lastHit > cooldown)) {
           nearest.health = Math.max(0, nearest.health - dmg);
           ent.lastHit = Date.now();
         }
@@ -286,15 +345,26 @@ setInterval(() => {
   for (const [id, p] of playerList) {
     p.hunger = Math.max(0, p.hunger - 0.015);
     if (p.hunger <= 0) p.health = Math.max(0, p.health - 0.015);
-    else if (p.hunger > 14 && p.health < 20) p.health = Math.min(20, p.health + 0.02);
-    if (p.health <= 0) {
+
+    // Check death BEFORE regen - otherwise hunger-driven regen can nudge a
+    // player who just hit exactly 0 (from a fall/lava/combat hit) back above
+    // zero on the very next tick, silently undoing what should have been lethal.
+    if (p.health <= 0 && !p.gameOver) {
+      if (p.hardcore) {
+        p.gameOver = true;
+        io.to(id).emit('gameOver');
+        continue;
+      }
       const wasNether = p.dim === 'nether';
       p.dim = 'overworld'; // dying anywhere sends you back to the overworld to respawn
       const spawn = respawnPoint(p);
       p.x = spawn.x; p.y = spawn.y; p.z = spawn.z;
       p.health = 20; p.hunger = 20;
       io.to(id).emit('respawn', { x: p.x, y: p.y, z: p.z, fromNether: wasNether });
+      continue;
     }
+
+    if (p.hunger > 14 && p.health < 20) p.health = Math.min(20, p.health + 0.02);
   }
 
   for (const [id, p] of playerList) {
@@ -302,7 +372,7 @@ setInterval(() => {
     for (const eid in entities) if (entities[eid].dim === p.dim) visibleEntities[eid] = entities[eid];
     const visiblePlayers = {};
     for (const [pid, pp] of playerList) if (pp.dim === p.dim) visiblePlayers[pid] = pp;
-    io.to(id).emit('tick', { players: visiblePlayers, entities: visibleEntities, dayClock: getDayClock() });
+    io.to(id).emit('tick', { players: visiblePlayers, entities: visibleEntities, dayClock: getDayClock(), isRaining });
   }
 }, TICK_MS);
 
