@@ -59,6 +59,8 @@ const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerH
 const renderer = new THREE.WebGLRenderer({ antialias: true });
 renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.outputEncoding = THREE.sRGBEncoding;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.15;
 renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 document.body.appendChild(renderer.domElement);
@@ -98,6 +100,33 @@ scene.add(sunSprite);
 const moonSprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: makeGlowTexture('222,228,245'), transparent: true, depthWrite: false, fog: false }));
 moonSprite.scale.set(11, 11, 1);
 scene.add(moonSprite);
+
+// ---------- Drifting clouds ----------
+const cloudTexture = makeGlowTexture('255,255,255');
+const clouds = [];
+for (let i = 0; i < 14; i++) {
+  const cloud = new THREE.Sprite(new THREE.SpriteMaterial({ map: cloudTexture, transparent: true, opacity: 0.55, depthWrite: false, fog: false }));
+  const scale = 18 + Math.random() * 20;
+  cloud.scale.set(scale, scale * 0.4, 1);
+  cloud.userData.offset = { x: (Math.random() - 0.5) * 160, z: (Math.random() - 0.5) * 160 };
+  cloud.userData.speed = 1 + Math.random() * 1.5;
+  scene.add(cloud);
+  clouds.push(cloud);
+}
+let cloudDrift = 0;
+const CLOUD_RANGE = 160;
+function wrapRange(v, range) { return ((v % range) + range) % range - range / 2; }
+function updateClouds(dt) {
+  cloudDrift += dt;
+  for (const cloud of clouds) {
+    const driftedX = wrapRange(cloud.userData.offset.x + cloudDrift * cloud.userData.speed, CLOUD_RANGE * 2);
+    cloud.position.set(
+      camera.position.x + driftedX,
+      55 + Math.sin(cloud.userData.offset.z * 0.05) * 3,
+      camera.position.z + cloud.userData.offset.z
+    );
+  }
+}
 
 const DAY_SKY = new THREE.Color(0x7ec0ee);
 const NIGHT_SKY = new THREE.Color(0x0a0e2a);
@@ -193,7 +222,9 @@ const MATERIAL_COLORS = {
   rail: 0x9a9a9a, portal: 0x8e2de2, netherrack: 0x6b2020, lava: 0xff4500, water: 0x3a6fd8,
   furnace: 0x555050, glass: 0xcfe8e8, wool: 0xf0ede4, stairs: 0xc9a876, slab: 0xdcc199,
   enchant_table: 0x2d6b5e, brewing_stand: 0x6b4a8a, piston: 0x7a8a5a, hopper: 0x4a4a4a,
-  nether_brick: 0x3a1414
+  nether_brick: 0x3a1414,
+  coal_ore: 0x36393d, iron_ore: 0xb08968, gold_ore: 0xe6c235, diamond_ore: 0x5eead4,
+  crafting_table: 0x8a5a2b
 };
 const UNBREAKABLE = new Set(['bedrock', 'lava', 'water']);
 const boxGeo = new THREE.BoxGeometry(1, 1, 1);
@@ -203,7 +234,7 @@ const meshUserData = {}; // material -> { count, capacity, positions: [] }
 // Small procedural noise texture per material - crisp/pixelated on purpose,
 // so blocks read as textured surfaces instead of flat plastic color.
 function makeBlockTexture(hexColor, variance, grain) {
-  const size = 16;
+  const size = 32;
   const canvas = document.createElement('canvas');
   canvas.width = canvas.height = size;
   const ctx = canvas.getContext('2d');
@@ -232,16 +263,24 @@ const MATERIAL_VARIANCE = {
   sand: 0.25, snow: 0.15, bed: 0.3, wheat_young: 0.3, wheat_ripe: 0.3,
   lever: 0.3, plate: 0.3, door: 0.35, rail: 0.3, portal: 0.5, netherrack: 0.4, lava: 0.3, water: 0.2,
   furnace: 0.35, glass: 0.15, wool: 0.2, stairs: 0.3, slab: 0.3,
-  enchant_table: 0.4, brewing_stand: 0.4, piston: 0.35, hopper: 0.3, nether_brick: 0.35
+  enchant_table: 0.4, brewing_stand: 0.4, piston: 0.35, hopper: 0.3, nether_brick: 0.35,
+  coal_ore: 0.4, iron_ore: 0.35, gold_ore: 0.3, diamond_ore: 0.25, crafting_table: 0.35
 };
-const MATERIAL_GRAIN = { wood: 'vertical', planks: 'vertical', door: 'vertical' };
+const MATERIAL_GRAIN = { wood: 'vertical', planks: 'vertical', door: 'vertical', crafting_table: 'vertical' };
 const blockTextures = {};
 Object.keys(MATERIAL_COLORS).forEach((m) => {
   blockTextures[m] = makeBlockTexture(MATERIAL_COLORS[m], MATERIAL_VARIANCE[m] || 0.3, MATERIAL_GRAIN[m]);
 });
 
 function createMeshFor(material, capacity) {
-  const mat = new THREE.MeshLambertMaterial({ map: blockTextures[material] });
+  let mat;
+  if (material === 'lava') {
+    mat = new THREE.MeshBasicMaterial({ map: blockTextures[material] }); // unlit - glows in the dark
+  } else if (material === 'water') {
+    mat = new THREE.MeshLambertMaterial({ map: blockTextures[material], transparent: true, opacity: 0.78 });
+  } else {
+    mat = new THREE.MeshLambertMaterial({ map: blockTextures[material] });
+  }
   const mesh = new THREE.InstancedMesh(boxGeo, mat, capacity);
   mesh.count = 0;
   mesh.castShadow = true;
@@ -419,7 +458,7 @@ function loadChunk(cx, cz, columns, edits) {
     const { height, tree, biome } = columns[localKey];
     for (let y = World.BEDROCK_Y; y < height; y++) {
       if (World.isCave(wx, y, wz, height)) continue;
-      addBlockInstance(wx, y, wz, World.materialAt(y, height, biome), chunkKey);
+      addBlockInstance(wx, y, wz, World.materialAt(wx, y, wz, height, biome), chunkKey);
     }
     if (tree) buildTree(wx, wz, height, chunkKey);
   }
@@ -754,12 +793,15 @@ const inventory = {
   sand: 0, furnace: 0, glass: 0, wool: 0, stairs: 0, slab: 0, cooked_meat: 0,
   enchant_table: 0, brewing_stand: 0, piston: 0, hopper: 0,
   potion_speed: 0, potion_strength: 0, fish: 0, carrot: 0, potato: 0, carrot_seeds: 0, potato_seeds: 0,
+  crafting_table: 0, coal: 0, raw_iron: 0, raw_gold: 0, iron_ingot: 0, gold_ingot: 0, diamond: 0,
   tools: { pickaxe: null, axe: null, sword: null }
 };
 let selectedMaterial = 'dirt';
 let heldSpecial = null; // 'bed' | 'lever' | 'plate' | 'door' | 'rail' | 'portal' | 'bow' | 'wheat_seeds' | null
 const hotbarEl = document.getElementById('hotbar');
-const TOOL_TIER_RANK = { wood: 1, stone: 2 };
+const TOOL_TIER_RANK = { wood: 1, stone: 2, iron: 3, diamond: 4 };
+const MINING_REQUIREMENT = { stone: 'wood', coal_ore: 'wood', iron_ore: 'stone', gold_ore: 'iron', diamond_ore: 'iron' };
+const ORE_DROPS = { coal_ore: 'coal', iron_ore: 'raw_iron', gold_ore: 'raw_gold', diamond_ore: 'diamond' };
 
 function renderHotbar() {
   hotbarEl.innerHTML = '';
@@ -783,7 +825,7 @@ renderHotbar();
 
 // ---------- Crafting menu ----------
 const RECIPES = [
-  { id: 'planks', name: 'Planks (1 wood -> 4 planks)', cost: { wood: 1 }, give: { planks: 4 } },
+  { id: 'planks', name: 'Planks (1 wood -> 4 planks)', cost: { wood: 1 }, give: { planks: 4 }, needsTable: false },
   { id: 'bed', name: 'Bed (3 planks)', cost: { planks: 3 }, give: { bed: 1 } },
   { id: 'pickaxe_wood', name: 'Wood Pickaxe (3 planks)', cost: { planks: 3 }, tool: { pickaxe: 'wood' } },
   { id: 'axe_wood', name: 'Wood Axe (3 planks)', cost: { planks: 3 }, tool: { axe: 'wood' } },
@@ -804,7 +846,14 @@ const RECIPES = [
   { id: 'enchant_table', name: 'Enchant Table (4 stone + 2 wood)', cost: { stone: 4, wood: 2 }, give: { enchant_table: 1 } },
   { id: 'brewing_stand', name: 'Brewing Stand (2 stone + 1 wood)', cost: { stone: 2, wood: 1 }, give: { brewing_stand: 1 } },
   { id: 'piston', name: 'Piston (3 stone + 2 wood)', cost: { stone: 3, wood: 2 }, give: { piston: 1 } },
-  { id: 'hopper', name: 'Hopper (5 stone)', cost: { stone: 5 }, give: { hopper: 1 } }
+  { id: 'hopper', name: 'Hopper (5 stone)', cost: { stone: 5 }, give: { hopper: 1 } },
+  { id: 'crafting_table', name: 'Crafting Table (4 planks)', cost: { planks: 4 }, give: { crafting_table: 1 }, needsTable: false },
+  { id: 'pickaxe_iron', name: 'Iron Pickaxe (3 iron ingots)', cost: { iron_ingot: 3 }, tool: { pickaxe: 'iron' }, requireTool: { pickaxe: 'stone' } },
+  { id: 'axe_iron', name: 'Iron Axe (3 iron ingots)', cost: { iron_ingot: 3 }, tool: { axe: 'iron' }, requireTool: { axe: 'stone' } },
+  { id: 'sword_iron', name: 'Iron Sword (2 iron ingots)', cost: { iron_ingot: 2 }, tool: { sword: 'iron' }, requireTool: { sword: 'stone' } },
+  { id: 'pickaxe_diamond', name: 'Diamond Pickaxe (3 diamonds)', cost: { diamond: 3 }, tool: { pickaxe: 'diamond' }, requireTool: { pickaxe: 'iron' } },
+  { id: 'axe_diamond', name: 'Diamond Axe (3 diamonds)', cost: { diamond: 3 }, tool: { axe: 'diamond' }, requireTool: { axe: 'iron' } },
+  { id: 'sword_diamond', name: 'Diamond Sword (2 diamonds)', cost: { diamond: 2 }, tool: { sword: 'diamond' }, requireTool: { sword: 'iron' } }
 ];
 let craftMenuOpen = false;
 let craftSelectedIndex = 0;
@@ -812,6 +861,7 @@ const craftMenuEl = document.getElementById('craft-menu');
 const recipeListEl = document.getElementById('recipe-list');
 
 function canAfford(recipe) {
+  if (recipe.needsTable !== false && !findNearbyBlockOfType('crafting_table', 4)) return false;
   for (const mat in recipe.cost) if ((inventory[mat] || 0) < recipe.cost[mat]) return false;
   if (recipe.requireTool) {
     for (const t in recipe.requireTool) {
@@ -829,8 +879,13 @@ function canAfford(recipe) {
 }
 
 const HELD_SPECIAL_ITEMS = new Set(['bed', 'lever', 'plate', 'door', 'rail', 'portal', 'bow',
-  'furnace', 'glass', 'wool', 'stairs', 'slab', 'enchant_table', 'brewing_stand', 'piston', 'hopper']);
+  'furnace', 'glass', 'wool', 'stairs', 'slab', 'enchant_table', 'brewing_stand', 'piston', 'hopper',
+  'crafting_table']);
 function craftRecipe(recipe) {
+  if (recipe.needsTable !== false && !findNearbyBlockOfType('crafting_table', 4)) {
+    showToast('Need a crafting table nearby');
+    return;
+  }
   if (!canAfford(recipe)) { showToast("Can't craft that yet"); return; }
   for (const mat in recipe.cost) inventory[mat] -= recipe.cost[mat];
   if (recipe.give) {
@@ -878,25 +933,33 @@ const ITEM_DISPLAY = {
   enchant_table: { name: 'Enchant Table' }, brewing_stand: { name: 'Brewing Stand' },
   piston: { name: 'Piston' }, hopper: { name: 'Hopper' },
   potion_speed: { name: 'Speed Potion', color: 0x4ad0e0 }, potion_strength: { name: 'Strength Potion', color: 0xc03030 },
-  fish: { name: 'Fish', color: 0x8fb3c9 }, carrot: { name: 'Carrot', color: 0xe08a2b }, potato: { name: 'Potato', color: 0xc9a86a }
+  fish: { name: 'Fish', color: 0x8fb3c9 }, carrot: { name: 'Carrot', color: 0xe08a2b }, potato: { name: 'Potato', color: 0xc9a86a },
+  crafting_table: { name: 'Crafting Table' },
+  coal: { name: 'Coal', color: 0x2b2b2b }, raw_iron: { name: 'Raw Iron', color: 0xb08968 },
+  raw_gold: { name: 'Raw Gold', color: 0xe6c235 }, iron_ingot: { name: 'Iron Ingot', color: 0xd8d8d8 },
+  gold_ingot: { name: 'Gold Ingot', color: 0xffd700 }, diamond: { name: 'Diamond', color: 0x5eead4 }
 };
 let invScreenOpen = false;
 const invScreenEl = document.getElementById('inv-screen');
 const invGridEl = document.getElementById('inv-grid');
 const invToolsEl = document.getElementById('inv-tools');
 
+const discoveredItems = new Set();
 function renderInventoryScreen() {
   invGridEl.innerHTML = '';
   for (const key in ITEM_DISPLAY) {
-    const info = ITEM_DISPLAY[key];
-    const color = info.color != null ? info.color : (MATERIAL_COLORS[key] != null ? MATERIAL_COLORS[key] : 0x999999);
     const count = inventory[key] || 0;
+    if (count > 0) discoveredItems.add(key);
+    const discovered = discoveredItems.has(key);
     const cell = document.createElement('div');
-    cell.className = 'inv-cell';
-    cell.style.opacity = count > 0 ? '1' : '0.35';
-    cell.innerHTML = `<span class="inv-count">${count}</span>
-      <span class="swatch" style="background:#${color.toString(16).padStart(6, '0')}"></span>
-      <span class="inv-name">${info.name}</span>`;
+    cell.className = 'inv-cell' + (discovered ? '' : ' inv-empty');
+    if (discovered) {
+      const info = ITEM_DISPLAY[key];
+      const color = info.color != null ? info.color : (MATERIAL_COLORS[key] != null ? MATERIAL_COLORS[key] : 0x999999);
+      cell.innerHTML = `<span class="inv-count">${count}</span>
+        <span class="swatch" style="background:#${color.toString(16).padStart(6, '0')}"></span>
+        <span class="inv-name">${info.name}</span>`;
+    }
     invGridEl.appendChild(cell);
   }
   const t = inventory.tools;
@@ -1007,7 +1070,7 @@ raycaster.far = 8;
 const centerVec = new THREE.Vector2(0, 0);
 document.addEventListener('contextmenu', (e) => e.preventDefault());
 
-const SWORD_DAMAGE = { none: 3, wood: 6, stone: 10 };
+const SWORD_DAMAGE = { none: 3, wood: 6, stone: 10, iron: 15, diamond: 22 };
 
 function breakOrAttack() {
   raycaster.setFromCamera(centerVec, camera);
@@ -1036,16 +1099,28 @@ function breakOrAttack() {
   if (!pos || UNBREAKABLE.has(material)) return;
 
   if (material === 'lever' || material === 'plate') { activateNearestMechanism(pos); return; }
-  if (material === 'stone' && !inventory.tools.pickaxe) { showToast('Need a pickaxe to mine stone'); return; }
+  const mineReq = MINING_REQUIREMENT[material];
+  if (mineReq) {
+    const have = inventory.tools.pickaxe;
+    if (!have || TOOL_TIER_RANK[have] < TOOL_TIER_RANK[mineReq]) {
+      showToast(`Need a ${mineReq} pickaxe or better`);
+      return;
+    }
+  }
 
   removeBlockInstance(pos.x, pos.y, pos.z);
+  const AXE_WOOD_BONUS = { none: 1, wood: 2, stone: 3, iron: 4, diamond: 5 };
   if (material === 'wheat_ripe') {
     inventory.wheat = (inventory.wheat || 0) + 1;
     inventory.wheat_seeds = (inventory.wheat_seeds || 0) + 1;
   } else if (material === 'wheat_young') {
     inventory.wheat_seeds = (inventory.wheat_seeds || 0) + 1;
   } else if (material === 'wood') {
-    inventory.wood = (inventory.wood || 0) + (inventory.tools.axe ? 3 : 1);
+    inventory.wood = (inventory.wood || 0) + AXE_WOOD_BONUS[inventory.tools.axe || 'none'];
+  } else if (ORE_DROPS[material]) {
+    const drop = ORE_DROPS[material];
+    inventory[drop] = (inventory[drop] || 0) + 1;
+    unlockAchievement('first_ore_' + drop, 'Miner (' + drop + ')');
   } else {
     inventory[material] = (inventory[material] || 0) + 1;
   }
@@ -1259,7 +1334,15 @@ function useNearbyBlock() {
 }
 
 function smeltAtFurnace() {
-  if (inventory.sand > 0) {
+  if (inventory.raw_iron > 0) {
+    inventory.raw_iron -= 1;
+    inventory.iron_ingot = (inventory.iron_ingot || 0) + 1;
+    showToast('Smelted raw iron into an ingot');
+  } else if (inventory.raw_gold > 0) {
+    inventory.raw_gold -= 1;
+    inventory.gold_ingot = (inventory.gold_ingot || 0) + 1;
+    showToast('Smelted raw gold into an ingot');
+  } else if (inventory.sand > 0) {
     inventory.sand -= 1;
     inventory.glass = (inventory.glass || 0) + 1;
     showToast('Smelted sand into glass');
@@ -1268,7 +1351,7 @@ function smeltAtFurnace() {
     inventory.cooked_meat = (inventory.cooked_meat || 0) + 1;
     showToast('Cooked meat');
   } else {
-    showToast('Nothing to smelt (need sand or raw meat)');
+    showToast('Nothing to smelt');
     return;
   }
   renderHotbar();
@@ -1676,6 +1759,11 @@ function animate() {
   lastDayClock = dayClock;
 
   updateWeather(dt);
+  updateClouds(dt);
+  if (blockTextures.water) {
+    blockTextures.water.offset.x = (blockTextures.water.offset.x + dt * 0.015) % 1;
+    blockTextures.water.offset.y = (blockTextures.water.offset.y + dt * 0.008) % 1;
+  }
 
   // day/night visuals
   const fade = 0.05;

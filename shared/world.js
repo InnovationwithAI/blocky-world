@@ -92,8 +92,25 @@
     return [Math.floor(wx / CHUNK_SIZE), Math.floor(wz / CHUNK_SIZE)];
   }
 
+  // Ore veins get rarer (and more valuable) the deeper you go.
+  function oreAt(x, y, z) {
+    const r = hash3(x * 12.9, y * 7.7, z * 12.9);
+    if (y <= BEDROCK_Y + 3) {
+      if (r > 0.985) return 'diamond_ore';
+      if (r > 0.94) return 'gold_ore';
+      if (r > 0.85) return 'iron_ore';
+      if (r > 0.78) return 'coal_ore';
+    } else if (y <= 2) {
+      if (r > 0.95) return 'iron_ore';
+      if (r > 0.85) return 'coal_ore';
+    } else if (r > 0.93) {
+      return 'coal_ore';
+    }
+    return null;
+  }
+
   // Material for a given y within a column whose surface is at `height`.
-  function materialAt(y, height, biome) {
+  function materialAt(x, y, z, height, biome) {
     if (y === BEDROCK_Y) return 'bedrock';
     if (y === height - 1) {
       if (biome === 'desert') return 'sand';
@@ -101,7 +118,8 @@
       return 'grass';
     }
     if (y >= height - 1 - DIRT_DEPTH) return biome === 'desert' ? 'sand' : 'dirt';
-    return 'stone';
+    const ore = oreAt(x, y, z);
+    return ore || 'stone';
   }
 
   // Carve underground tunnels/pockets with 3D noise. Kept away from bedrock
@@ -115,7 +133,7 @@
 
   return {
     CHUNK_SIZE, BEDROCK_Y, DIRT_DEPTH,
-    heightAt, treeAt, biomeAt, materialAt, isCave,
+    heightAt, treeAt, biomeAt, materialAt, isCave, oreAt,
     generateChunkColumns, worldToChunk, hash
   };
 });
