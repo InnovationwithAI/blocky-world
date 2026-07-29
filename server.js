@@ -215,6 +215,22 @@ io.on('connection', (socket) => {
     p.hardcore = !!hardcore;
   });
 
+  // Personal reset only - a fresh character/spawn for this player. Does not
+  // touch the shared world, other players, or anything anyone has built.
+  socket.on('startNewGame', () => {
+    const p = players[socket.id];
+    if (!p) return;
+    const wasNether = p.dim === 'nether';
+    p.dim = 'overworld';
+    p.bedSpawn = null;
+    p.hardcore = false;
+    p.gameOver = false;
+    const spawn = randomSpawn();
+    p.x = spawn.x; p.y = spawn.y; p.z = spawn.z;
+    p.health = 20; p.hunger = 20;
+    io.to(socket.id).emit('respawn', { x: p.x, y: p.y, z: p.z, fromNether: wasNether });
+  });
+
   socket.on('disconnect', () => {
     delete players[socket.id];
     io.emit('playerLeft', { id: socket.id });

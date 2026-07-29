@@ -9,7 +9,7 @@
 
   const CHUNK_SIZE = 16;
   const SEED = 1337;
-  const BEDROCK_Y = -6;
+  const BEDROCK_Y = -24;
   const DIRT_DEPTH = 3;
 
   function hash(x, z) {

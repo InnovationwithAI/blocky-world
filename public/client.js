@@ -786,16 +786,19 @@ function blockOverlapsPlayer(bx, by, bz) {
 
 // ---------- Inventory & hotbar ----------
 const HOTBAR_ORDER = ['dirt', 'stone', 'grass', 'wood', 'leaves', 'planks'];
-const inventory = {
-  grass: 0, dirt: 10, stone: 5, wood: 0, leaves: 0, planks: 0, apple: 2, meat: 0,
-  bed: 0, bow: 0, rail: 0, lever: 0, plate: 0, door: 0, portal: 1,
-  wheat_seeds: 0, wheat: 0, water: 1, lava: 1,
-  sand: 0, furnace: 0, glass: 0, wool: 0, stairs: 0, slab: 0, cooked_meat: 0,
-  enchant_table: 0, brewing_stand: 0, piston: 0, hopper: 0,
-  potion_speed: 0, potion_strength: 0, fish: 0, carrot: 0, potato: 0, carrot_seeds: 0, potato_seeds: 0,
-  crafting_table: 0, coal: 0, raw_iron: 0, raw_gold: 0, iron_ingot: 0, gold_ingot: 0, diamond: 0,
-  tools: { pickaxe: null, axe: null, sword: null }
-};
+function makeDefaultInventory() {
+  return {
+    grass: 0, dirt: 10, stone: 5, wood: 0, leaves: 0, planks: 0, apple: 2, meat: 0,
+    bed: 0, bow: 0, rail: 0, lever: 0, plate: 0, door: 0, portal: 1,
+    wheat_seeds: 0, wheat: 0, water: 1, lava: 1,
+    sand: 0, furnace: 0, glass: 0, wool: 0, stairs: 0, slab: 0, cooked_meat: 0,
+    enchant_table: 0, brewing_stand: 0, piston: 0, hopper: 0,
+    potion_speed: 0, potion_strength: 0, fish: 0, carrot: 0, potato: 0, carrot_seeds: 0, potato_seeds: 0,
+    crafting_table: 0, coal: 0, raw_iron: 0, raw_gold: 0, iron_ingot: 0, gold_ingot: 0, diamond: 0,
+    tools: { pickaxe: null, axe: null, sword: null }
+  };
+}
+const inventory = makeDefaultInventory();
 let selectedMaterial = 'dirt';
 let heldSpecial = null; // 'bed' | 'lever' | 'plate' | 'door' | 'rail' | 'portal' | 'bow' | 'wheat_seeds' | null
 const hotbarEl = document.getElementById('hotbar');
@@ -1040,6 +1043,7 @@ document.addEventListener('keydown', (e) => {
     case 'KeyG': toggleCreative(); break;
     case 'KeyP': toggleHardcore(); break;
     case 'KeyO': toggleSpectator(); break;
+    case 'KeyM': requestNewGame(); break;
     case 'KeyR': toggleRide(); break;
     case 'KeyC': useNearbyBlock(); break;
     case 'KeyV': drinkPotion(); break;
@@ -1480,6 +1484,35 @@ function toggleSpectator() {
 }
 
 let gameOver = false;
+
+// Resets this player only: fresh inventory, health, hunger, position, and
+// achievements. The shared world and other players are untouched.
+let newGameConfirmUntil = 0;
+function requestNewGame() {
+  if (performance.now() < newGameConfirmUntil) {
+    newGameConfirmUntil = 0;
+    startNewGame();
+  } else {
+    newGameConfirmUntil = performance.now() + 3000;
+    showToast('Press M again to start a new game (resets your inventory & health)');
+  }
+}
+function startNewGame() {
+  Object.assign(inventory, makeDefaultInventory());
+  discoveredItems.clear();
+  unlockedAchievements.clear();
+  heldSpecial = null;
+  selectedMaterial = 'dirt';
+  hardcoreMode = false;
+  gameOver = false;
+  creativeMode = false;
+  spectatorMode = false;
+  document.getElementById('gameover-banner').style.display = 'none';
+  document.getElementById('apple-count').textContent = `Apples: ${inventory.apple} | Meat: ${inventory.meat} (F to eat)`;
+  renderHotbar();
+  socket.emit('startNewGame');
+  showToast('Starting a new game...');
+}
 
 let riding = false;
 function toggleRide() {
