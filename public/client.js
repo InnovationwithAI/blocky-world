@@ -734,7 +734,9 @@ function startGame() {
   try { controls.lock(); } catch (e) { /* no mouse available - keyboard controls still work */ }
 }
 instructions.addEventListener('click', startGame);
-controls.addEventListener('unlock', () => { instructions.style.display = 'flex'; });
+controls.addEventListener('unlock', () => {
+  if (!craftMenuOpen && !invScreenOpen) instructions.style.display = 'flex';
+});
 
 const move = { forward: false, back: false, left: false, right: false, up: false, down: false };
 const look = { left: false, right: false, up: false, down: false };
@@ -843,9 +845,9 @@ const RECIPES = [
   { id: 'door', name: 'Door (4 planks)', cost: { planks: 4 }, give: { door: 1 } },
   { id: 'portal', name: 'Portal Block (6 stone)', cost: { stone: 6 }, give: { portal: 1 } },
   { id: 'furnace', name: 'Furnace (5 stone)', cost: { stone: 5 }, give: { furnace: 1 } },
-  { id: 'wool', name: 'Wool (2 leaves)', cost: { leaves: 2 }, give: { wool: 1 } },
+  { id: 'wool', name: 'Wool (2 leaves)', cost: { leaves: 2 }, give: { wool: 1 }, needsTable: false },
   { id: 'stairs', name: 'Stairs x4 (4 planks)', cost: { planks: 4 }, give: { stairs: 4 } },
-  { id: 'slab', name: 'Slabs x4 (2 planks)', cost: { planks: 2 }, give: { slab: 4 } },
+  { id: 'slab', name: 'Slabs x4 (2 planks)', cost: { planks: 2 }, give: { slab: 4 }, needsTable: false },
   { id: 'enchant_table', name: 'Enchant Table (4 stone + 2 wood)', cost: { stone: 4, wood: 2 }, give: { enchant_table: 1 } },
   { id: 'brewing_stand', name: 'Brewing Stand (2 stone + 1 wood)', cost: { stone: 2, wood: 1 }, give: { brewing_stand: 1 } },
   { id: 'piston', name: 'Piston (3 stone + 2 wood)', cost: { stone: 3, wood: 2 }, give: { piston: 1 } },
@@ -919,7 +921,7 @@ function renderCraftMenu() {
 function toggleCraftMenu() {
   craftMenuOpen = !craftMenuOpen;
   craftMenuEl.style.display = craftMenuOpen ? 'flex' : 'none';
-  if (craftMenuOpen) renderCraftMenu();
+  if (craftMenuOpen) { renderCraftMenu(); try { controls.unlock(); } catch (e) { /* not locked */ } }
 }
 
 // ---------- Inventory screen ----------
@@ -946,33 +948,82 @@ let invScreenOpen = false;
 const invScreenEl = document.getElementById('inv-screen');
 const invGridEl = document.getElementById('inv-grid');
 const invToolsEl = document.getElementById('inv-tools');
+const invSearchEl = document.getElementById('inv-search');
+
+function itemColorFor(key) {
+  const info = ITEM_DISPLAY[key];
+  if (info && info.color != null) return info.color;
+  if (MATERIAL_COLORS[key] != null) return MATERIAL_COLORS[key];
+  return 0x999999;
+}
+function itemNameFor(key) {
+  return (ITEM_DISPLAY[key] && ITEM_DISPLAY[key].name) || key;
+}
+function swatchHex(key) { return itemColorFor(key).toString(16).padStart(6, '0'); }
 
 const discoveredItems = new Set();
 function renderInventoryScreen() {
+  const query = invSearchEl.value.trim().toLowerCase();
   invGridEl.innerHTML = '';
   for (const key in ITEM_DISPLAY) {
     const count = inventory[key] || 0;
     if (count > 0) discoveredItems.add(key);
     const discovered = discoveredItems.has(key);
+    if (query && (!discovered || !itemNameFor(key).toLowerCase().includes(query))) continue;
     const cell = document.createElement('div');
     cell.className = 'inv-cell' + (discovered ? '' : ' inv-empty');
     if (discovered) {
-      const info = ITEM_DISPLAY[key];
-      const color = info.color != null ? info.color : (MATERIAL_COLORS[key] != null ? MATERIAL_COLORS[key] : 0x999999);
       cell.innerHTML = `<span class="inv-count">${count}</span>
-        <span class="swatch" style="background:#${color.toString(16).padStart(6, '0')}"></span>
-        <span class="inv-name">${info.name}</span>`;
+        <span class="swatch" style="background:#${swatchHex(key)}"></span>
+        <span class="inv-name">${itemNameFor(key)}</span>`;
     }
     invGridEl.appendChild(cell);
   }
   const t = inventory.tools;
   invToolsEl.innerHTML = `<span>Pickaxe: ${t.pickaxe || 'none'}</span><span>Axe: ${t.axe || 'none'}</span><span>Sword: ${t.sword || 'none'}</span>`;
 }
+invSearchEl.addEventListener('input', renderInventoryScreen);
+
+// ---------- Pocket crafting (2x2, no table needed) ----------
+const POCKET_RECIPES = RECIPES.filter((r) => r.needsTable === false);
+let pocketSelectedIndex = 0;
+const pocketGridEl = document.getElementById('pocket-craft-grid');
+const pocketOutputEl = document.getElementById('pocket-craft-output');
+const pocketLabelEl = document.getElementById('pocket-craft-label');
+
+function renderPocketCraft() {
+  pocketGridEl.innerHTML = '';
+  POCKET_RECIPES.forEach((r, i) => {
+    const outputKey = Object.keys(r.give || {})[0];
+    const slot = document.createElement('div');
+    slot.className = 'pocket-slot' + (i === pocketSelectedIndex ? ' selected' : '') + (canAfford(r) ? '' : ' unaffordable');
+    slot.innerHTML = outputKey ? `<span class="swatch" style="background:#${swatchHex(outputKey)}"></span>` : '';
+    slot.addEventListener('click', () => { pocketSelectedIndex = i; craftPocketSelected(); });
+    pocketGridEl.appendChild(slot);
+  });
+  const r = POCKET_RECIPES[pocketSelectedIndex];
+  const outputKey = r ? Object.keys(r.give || {})[0] : null;
+  pocketOutputEl.innerHTML = outputKey ? `<span class="swatch" style="background:#${swatchHex(outputKey)}"></span>` : '';
+  pocketLabelEl.textContent = r ? r.name : '';
+}
+function craftPocketSelected() {
+  const r = POCKET_RECIPES[pocketSelectedIndex];
+  if (!r) return;
+  craftRecipe(r);
+  renderPocketCraft();
+  renderInventoryScreen();
+}
 
 function toggleInventoryScreen() {
   invScreenOpen = !invScreenOpen;
   invScreenEl.style.display = invScreenOpen ? 'flex' : 'none';
-  if (invScreenOpen) renderInventoryScreen();
+  if (invScreenOpen) {
+    renderInventoryScreen();
+    renderPocketCraft();
+    try { controls.unlock(); } catch (e) { /* not locked */ }
+  } else {
+    invSearchEl.blur();
+  }
 }
 
 const STARTER_KEYS = new Set(['KeyW', 'KeyA', 'KeyS', 'KeyD', 'Space', 'Enter',
@@ -1002,7 +1053,19 @@ document.addEventListener('keydown', (e) => {
     return;
   }
   if (invScreenOpen) {
-    if (e.code === 'KeyX' || e.code === 'Escape') toggleInventoryScreen();
+    const searching = document.activeElement === invSearchEl;
+    if (e.code === 'Escape') { toggleInventoryScreen(); return; }
+    if (e.code === 'KeyX' && !searching) { toggleInventoryScreen(); return; }
+    if (searching) return; // let the browser handle normal text-input typing
+    if (e.code === 'ArrowLeft' || e.code === 'ArrowRight') {
+      pocketSelectedIndex = (pocketSelectedIndex + (e.code === 'ArrowRight' ? 1 : POCKET_RECIPES.length - 1)) % POCKET_RECIPES.length;
+      renderPocketCraft();
+    } else if (e.code === 'ArrowUp' || e.code === 'ArrowDown') {
+      const next = pocketSelectedIndex + (e.code === 'ArrowDown' ? 2 : -2);
+      if (next >= 0 && next < POCKET_RECIPES.length) { pocketSelectedIndex = next; renderPocketCraft(); }
+    } else if (e.code === 'Enter') {
+      craftPocketSelected();
+    }
     return;
   }
 

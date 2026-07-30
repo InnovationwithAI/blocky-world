@@ -80,22 +80,48 @@
   #craft-hint { font-size: 11px; opacity: 0.7; text-align: center; margin-top: 6px; }
   #inv-screen {
     position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%);
-    display: none; flex-direction: column; gap: 8px; background: rgba(15,15,15,0.92);
-    border: 2px solid rgba(255,255,255,0.3); border-radius: 8px; padding: 16px; color: white;
-    min-width: 380px; max-width: 480px; z-index: 22;
+    display: none; flex-direction: row; gap: 0; background: rgba(15,15,15,0.94);
+    border: 2px solid rgba(255,255,255,0.3); border-radius: 8px; color: white;
+    z-index: 22; overflow: hidden;
   }
-  #inv-screen h2 { margin: 0 0 4px 0; font-size: 16px; text-align: center; }
-  #inv-grid { display: grid; grid-template-columns: repeat(6, 1fr); gap: 8px; }
+  #inv-screen h2 { margin: 0 0 8px 0; font-size: 16px; text-align: center; }
+  #inv-left { display: flex; flex-direction: column; gap: 8px; width: 300px; padding: 14px; }
+  #inv-right { display: flex; flex-direction: column; gap: 12px; width: 210px; padding: 14px; border-left: 1px solid rgba(255,255,255,0.15); background: rgba(255,255,255,0.02); }
+  #inv-search {
+    width: 100%; box-sizing: border-box; padding: 6px 8px; border-radius: 5px;
+    border: 1px solid rgba(255,255,255,0.25); background: rgba(0,0,0,0.45); color: white; font-size: 13px;
+  }
+  #inv-search:focus { outline: 1px solid rgba(255,255,255,0.5); }
+  #inv-grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 7px; max-height: 260px; overflow-y: auto; }
   .inv-cell {
     display: flex; flex-direction: column; align-items: center; justify-content: center;
-    background: rgba(255,255,255,0.06); border-radius: 6px; padding: 6px 2px; min-height: 54px;
+    background: rgba(255,255,255,0.06); border-radius: 6px; padding: 5px 2px; min-height: 50px;
+    border: 1px solid rgba(255,255,255,0.1);
   }
-  .inv-cell .swatch { width: 22px; height: 22px; margin-top: 0; }
-  .inv-cell .inv-name { font-size: 9px; opacity: 0.85; margin-top: 3px; text-align: center; }
-  .inv-cell .inv-count { font-size: 12px; font-weight: bold; }
-  .inv-cell.inv-empty { background: rgba(255,255,255,0.02); border: 1px dashed rgba(255,255,255,0.08); }
-  #inv-tools { display: flex; justify-content: space-around; font-size: 12px; margin-top: 4px; }
-  #inv-hint { font-size: 11px; opacity: 0.7; text-align: center; margin-top: 4px; }
+  .inv-cell .swatch { width: 20px; height: 20px; margin-top: 0; border-radius: 3px; }
+  .inv-cell .inv-name { font-size: 8px; opacity: 0.85; margin-top: 3px; text-align: center; line-height: 1.1; }
+  .inv-cell .inv-count { font-size: 11px; font-weight: bold; }
+  .inv-cell.inv-empty { background: rgba(255,255,255,0.02); border: 1px dashed rgba(255,255,255,0.1); }
+  #inv-tools { display: flex; flex-direction: column; gap: 2px; font-size: 11px; opacity: 0.85; margin-top: 4px; }
+  #inv-hint { font-size: 10px; opacity: 0.65; text-align: center; margin-top: 4px; }
+  #pocket-craft-row { display: flex; align-items: center; justify-content: center; gap: 8px; }
+  #pocket-craft-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 6px; }
+  .pocket-slot {
+    width: 44px; height: 44px; border-radius: 5px; background: rgba(255,255,255,0.07);
+    border: 1px solid rgba(255,255,255,0.15); display: flex; flex-direction: column;
+    align-items: center; justify-content: center; cursor: pointer; position: relative;
+  }
+  .pocket-slot .swatch { width: 18px; height: 18px; border-radius: 3px; }
+  .pocket-slot.selected { border-color: white; box-shadow: 0 0 6px rgba(255,255,255,0.6); }
+  .pocket-slot.unaffordable { opacity: 0.4; }
+  #pocket-craft-arrow { font-size: 20px; opacity: 0.6; }
+  #pocket-craft-output {
+    width: 44px; height: 44px; border-radius: 5px; background: rgba(255,255,255,0.05);
+    border: 1px dashed rgba(255,255,255,0.2); display: flex; flex-direction: column;
+    align-items: center; justify-content: center;
+  }
+  #pocket-craft-output .swatch { width: 18px; height: 18px; border-radius: 3px; }
+  #pocket-craft-label { font-size: 10px; opacity: 0.8; text-align: center; min-height: 24px; }
 </style>
 </head>
 <body>
@@ -108,10 +134,22 @@
   <div id="craft-hint">Up/Down or mouse to select &middot; Enter/click to craft &middot; E to close</div>
 </div>
 <div id="inv-screen">
-  <h2>Inventory</h2>
-  <div id="inv-grid"></div>
-  <div id="inv-tools"></div>
-  <div id="inv-hint">X to close</div>
+  <div id="inv-left">
+    <h2>Inventory</h2>
+    <input id="inv-search" type="text" placeholder="Search..." autocomplete="off">
+    <div id="inv-grid"></div>
+    <div id="inv-tools"></div>
+  </div>
+  <div id="inv-right">
+    <h2>Crafting</h2>
+    <div id="pocket-craft-row">
+      <div id="pocket-craft-grid"></div>
+      <div id="pocket-craft-arrow">&rarr;</div>
+      <div id="pocket-craft-output"><span class="swatch" style="background:#333"></span></div>
+    </div>
+    <div id="pocket-craft-label">No table needed for these</div>
+    <div id="inv-hint">Arrows+Enter or click to craft &middot; X to close</div>
+  </div>
 </div>
 <div id="stats">
   <div class="bar-label"><span>Health</span></div>
