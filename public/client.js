@@ -263,6 +263,64 @@ function makeBlockTexture(hexColor, variance, grain) {
   tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
   return tex;
 }
+// Grass's side face: dirt base with a jagged green fringe near the top,
+// like the classic grass-over-dirt look, instead of a flat green cube.
+function makeGrassSideTexture() {
+  const size = 32;
+  const canvas = document.createElement('canvas');
+  canvas.width = canvas.height = size;
+  const ctx = canvas.getContext('2d');
+  const dirt = new THREE.Color(MATERIAL_COLORS.dirt);
+  const grass = new THREE.Color(MATERIAL_COLORS.grass);
+  for (let y = 0; y < size; y++) {
+    for (let x = 0; x < size; x++) {
+      let n = Math.sin(x * 12.9898 + y * 78.233) * 43758.5453;
+      n = n - Math.floor(n);
+      const edge = size * 0.24 + n * 4;
+      const base = y < edge ? grass : dirt;
+      const shade = 1 + (n - 0.5) * 0.4;
+      const r = Math.min(255, Math.max(0, Math.round(base.r * 255 * shade)));
+      const g = Math.min(255, Math.max(0, Math.round(base.g * 255 * shade)));
+      const b = Math.min(255, Math.max(0, Math.round(base.b * 255 * shade)));
+      ctx.fillStyle = `rgb(${r},${g},${b})`;
+      ctx.fillRect(x, y, 1, 1);
+    }
+  }
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.magFilter = THREE.NearestFilter;
+  tex.minFilter = THREE.NearestFilter;
+  tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+  return tex;
+}
+
+// Log end-grain: concentric rings for the top/bottom faces of a wood block.
+function makeRingsTexture(hexColor) {
+  const size = 32;
+  const canvas = document.createElement('canvas');
+  canvas.width = canvas.height = size;
+  const ctx = canvas.getContext('2d');
+  const base = new THREE.Color(hexColor);
+  const cx = size / 2, cy = size / 2;
+  for (let y = 0; y < size; y++) {
+    for (let x = 0; x < size; x++) {
+      const dx = x - cx, dy = y - cy;
+      const dist = Math.sqrt(dx * dx + dy * dy);
+      const ring = Math.sin(dist * 1.3) * 0.5 + 0.5;
+      let n = Math.sin(x * 12.9898 + y * 78.233) * 43758.5453;
+      n = n - Math.floor(n);
+      const shade = 0.75 + ring * 0.35 + (n - 0.5) * 0.1;
+      const r = Math.min(255, Math.max(0, Math.round(base.r * 255 * shade)));
+      const g = Math.min(255, Math.max(0, Math.round(base.g * 255 * shade)));
+      const b = Math.min(255, Math.max(0, Math.round(base.b * 255 * shade)));
+      ctx.fillStyle = `rgb(${r},${g},${b})`;
+      ctx.fillRect(x, y, 1, 1);
+    }
+  }
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.magFilter = THREE.NearestFilter;
+  tex.minFilter = THREE.NearestFilter;
+  return tex;
+}
 const MATERIAL_VARIANCE = {
   grass: 0.35, dirt: 0.4, stone: 0.3, wood: 0.5, leaves: 0.4, planks: 0.3, bedrock: 0.5,
   sand: 0.25, snow: 0.15, bed: 0.3, wheat_young: 0.3, wheat_ripe: 0.3,
@@ -276,15 +334,44 @@ const blockTextures = {};
 Object.keys(MATERIAL_COLORS).forEach((m) => {
   blockTextures[m] = makeBlockTexture(MATERIAL_COLORS[m], MATERIAL_VARIANCE[m] || 0.3, MATERIAL_GRAIN[m]);
 });
+blockTextures.grass_side = makeGrassSideTexture();
+blockTextures.wood_rings = makeRingsTexture(MATERIAL_COLORS.wood);
+
+// Faces get their own texture where a block reads better with one (grass, logs);
+// everything else reuses its single texture across all 6 faces.
+const FACE_TEXTURES = {
+  grass: { top: 'grass', side: 'grass_side', bottom: 'dirt' },
+  wood: { top: 'wood_rings', side: 'wood', bottom: 'wood_rings' }
+};
+// Cheap substitute for true corner ambient occlusion (which would need per-vertex
+// baked lighting from neighboring blocks - not workable with one InstancedMesh per
+// material type). Matches classic Minecraft's flat per-face-direction shading:
+// top brightest, bottom darkest, sides in between - gives blocks a 3D read at a glance.
+const FACE_BRIGHTNESS = { top: 1.0, side: 0.8, bottom: 0.55 };
+// BoxGeometry face/group order: +x, -x, +y, -y, +z, -z (right, left, top, bottom, front, back)
+const FACE_ORDER = ['side', 'side', 'top', 'bottom', 'side', 'side'];
+
+function buildFaceMaterials(material, extraProps) {
+  const faceMap = FACE_TEXTURES[material];
+  return FACE_ORDER.map((face) => {
+    const texKey = faceMap ? faceMap[face] : material;
+    const brightness = FACE_BRIGHTNESS[face];
+    const shade = Math.round(brightness * 255);
+    return new THREE.MeshLambertMaterial(Object.assign({
+      map: blockTextures[texKey],
+      color: new THREE.Color(shade / 255, shade / 255, shade / 255)
+    }, extraProps));
+  });
+}
 
 function createMeshFor(material, capacity) {
   let mat;
   if (material === 'lava') {
     mat = new THREE.MeshBasicMaterial({ map: blockTextures[material] }); // unlit - glows in the dark
   } else if (material === 'water') {
-    mat = new THREE.MeshLambertMaterial({ map: blockTextures[material], transparent: true, opacity: 0.78 });
+    mat = buildFaceMaterials(material, { transparent: true, opacity: 0.78 });
   } else {
-    mat = new THREE.MeshLambertMaterial({ map: blockTextures[material] });
+    mat = buildFaceMaterials(material);
   }
   const mesh = new THREE.InstancedMesh(boxGeo, mat, capacity);
   mesh.count = 0;
