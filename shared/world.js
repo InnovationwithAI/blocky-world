@@ -11,6 +11,7 @@
   const SEED = 1337;
   const BEDROCK_Y = -24;
   const DIRT_DEPTH = 3;
+  const WATER_LEVEL = 5;
 
   function hash(x, z) {
     let n = Math.sin(x * 127.1 + z * 311.7 + SEED * 0.017) * 43758.5453123;
@@ -82,7 +83,7 @@
         const wx = cx * CHUNK_SIZE + lx;
         const wz = cz * CHUNK_SIZE + lz;
         const h = heightAt(wx, wz);
-        columns[lx + ',' + lz] = { height: h, tree: treeAt(wx, wz) && h > 0, biome: biomeAt(wx, wz) };
+        columns[lx + ',' + lz] = { height: h, tree: treeAt(wx, wz) && h > WATER_LEVEL, biome: biomeAt(wx, wz) };
       }
     }
     return columns;
@@ -113,7 +114,7 @@
   function materialAt(x, y, z, height, biome) {
     if (y === BEDROCK_Y) return 'bedrock';
     if (y === height - 1) {
-      if (biome === 'desert') return 'sand';
+      if (height <= WATER_LEVEL || biome === 'desert') return 'sand';
       if (biome === 'snow') return 'snow';
       return 'grass';
     }
@@ -132,7 +133,7 @@
   }
 
   return {
-    CHUNK_SIZE, BEDROCK_Y, DIRT_DEPTH,
+    CHUNK_SIZE, BEDROCK_Y, DIRT_DEPTH, WATER_LEVEL,
     heightAt, treeAt, biomeAt, materialAt, isCave, oreAt,
     generateChunkColumns, worldToChunk, hash
   };

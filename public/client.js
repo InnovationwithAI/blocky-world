@@ -63,6 +63,7 @@ renderer.toneMapping = THREE.ACESFilmicToneMapping;
 renderer.toneMappingExposure = 1.15;
 renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+renderer.autoClear = false; // main scene + a separate overlay pass for the first-person hand
 document.body.appendChild(renderer.domElement);
 
 const hemiLight = new THREE.HemisphereLight(0xbfe3ff, 0x3a2f28, 1.0);
@@ -167,6 +168,10 @@ scene.fog = new THREE.Fog(0x7ec0ee, 50, 110);
 window.addEventListener('resize', () => {
   camera.aspect = window.innerWidth / window.innerHeight;
   camera.updateProjectionMatrix();
+  if (typeof handCamera !== 'undefined') {
+    handCamera.aspect = window.innerWidth / window.innerHeight;
+    handCamera.updateProjectionMatrix();
+  }
   renderer.setSize(window.innerWidth, window.innerHeight);
 });
 
@@ -292,6 +297,90 @@ function createMeshFor(material, capacity) {
   return mesh;
 }
 Object.keys(MATERIAL_COLORS).forEach((m) => createMeshFor(m, 2048));
+
+// Procedural crack overlay for timed mining - density of black speckle grows with progress.
+function makeCrackTexture(progress) {
+  const size = 32;
+  const canvas = document.createElement('canvas');
+  canvas.width = canvas.height = size;
+  const ctx = canvas.getContext('2d');
+  ctx.clearRect(0, 0, size, size);
+  const density = Math.min(1, progress) * 0.6;
+  for (let y = 0; y < size; y++) {
+    for (let x = 0; x < size; x++) {
+      let n = Math.sin(x * 12.9898 + y * 78.233 + 4.5) * 43758.5453;
+      n = n - Math.floor(n);
+      if (n < density) {
+        ctx.fillStyle = `rgba(15,10,5,${(0.4 + n * 0.5).toFixed(2)})`;
+        ctx.fillRect(x, y, 1, 1);
+      }
+    }
+  }
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.magFilter = THREE.NearestFilter;
+  tex.minFilter = THREE.NearestFilter;
+  return tex;
+}
+const CRACK_STAGES = 8;
+const crackTextures = [];
+for (let i = 0; i <= CRACK_STAGES; i++) crackTextures.push(makeCrackTexture(i / CRACK_STAGES));
+const crackMat = new THREE.MeshBasicMaterial({ map: crackTextures[0], transparent: true, depthWrite: false, polygonOffset: true, polygonOffsetFactor: -4 });
+const crackMesh = new THREE.Mesh(boxGeo, crackMat);
+crackMesh.scale.set(1.03, 1.03, 1.03);
+crackMesh.visible = false;
+scene.add(crackMesh);
+
+// ---------- First-person hand/held-item view ----------
+// Rendered as a separate scene/camera pass so it never z-fights with world geometry.
+const handScene = new THREE.Scene();
+const handCamera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.01, 4);
+const handGroup = new THREE.Group();
+const armMat = new THREE.MeshBasicMaterial({ color: 0xcf9a71 });
+const armMesh = new THREE.Mesh(new THREE.BoxGeometry(0.22, 0.55, 0.22), armMat);
+armMesh.position.set(0, -0.18, 0);
+handGroup.add(armMesh);
+const itemMat = new THREE.MeshBasicMaterial({ map: blockTextures.dirt });
+const itemMesh = new THREE.Mesh(new THREE.BoxGeometry(0.24, 0.24, 0.24), itemMat);
+itemMesh.position.set(0, 0.2, -0.05);
+itemMesh.userData.material = 'dirt';
+handGroup.add(itemMesh);
+handGroup.position.set(0.45, -0.42, -0.9);
+handGroup.rotation.set(0.25, -0.55, 0.15);
+handScene.add(handGroup);
+
+function currentHeldVisual() {
+  if (heldSpecial === 'bow') return 'wood';
+  if (heldSpecial === 'wheat_seeds') return 'wheat_young';
+  if (heldSpecial === 'water') return 'water';
+  if (heldSpecial === 'lava') return 'lava';
+  return selectedMaterial;
+}
+let handSwingUntil = 0;
+function triggerHandSwing() { handSwingUntil = performance.now() + 220; }
+const HAND_SWING_MS = 220;
+
+function updateHandView() {
+  const mat = currentHeldVisual();
+  if (itemMesh.userData.material !== mat && blockTextures[mat]) {
+    itemMat.map = blockTextures[mat];
+    itemMat.needsUpdate = true;
+    itemMesh.userData.material = mat;
+  }
+  const t = performance.now() / 1000;
+  const idleBobY = Math.sin(t * 1.6) * 0.01;
+  const idleBobX = Math.cos(t * 0.8) * 0.005;
+  const remain = handSwingUntil - performance.now();
+  let swingOffset = 0, swingRot = 0;
+  if (remain > 0) {
+    const p = 1 - remain / HAND_SWING_MS;
+    swingOffset = Math.sin(p * Math.PI) * 0.14;
+    swingRot = Math.sin(p * Math.PI) * -0.7;
+  }
+  handGroup.position.set(0.45 + idleBobX, -0.42 + idleBobY - swingOffset * 0.3, -0.9 + swingOffset * 0.15);
+  handGroup.rotation.set(0.25 + swingRot, -0.55, 0.15);
+  handCamera.rotation.set(0, 0, 0);
+  handScene.visible = gameStarted && !spectatorMode;
+}
 
 function growCapacity(material) {
   const old = meshes[material];
@@ -459,6 +548,11 @@ function loadChunk(cx, cz, columns, edits) {
     for (let y = World.BEDROCK_Y; y < height; y++) {
       if (World.isCave(wx, y, wz, height)) continue;
       addBlockInstance(wx, y, wz, World.materialAt(wx, y, wz, height, biome), chunkKey);
+    }
+    if (height <= World.WATER_LEVEL) {
+      for (let y = height; y <= World.WATER_LEVEL; y++) {
+        addBlockInstance(wx, y, wz, 'water', chunkKey);
+      }
     }
     if (tree) buildTree(wx, wz, height, chunkKey);
   }
@@ -806,6 +900,25 @@ let heldSpecial = null; // 'bed' | 'lever' | 'plate' | 'door' | 'rail' | 'portal
 const hotbarEl = document.getElementById('hotbar');
 const TOOL_TIER_RANK = { wood: 1, stone: 2, iron: 3, diamond: 4 };
 const MINING_REQUIREMENT = { stone: 'wood', coal_ore: 'wood', iron_ore: 'stone', gold_ore: 'iron', diamond_ore: 'iron' };
+const BLOCK_HARDNESS = {
+  grass: 0.5, dirt: 0.5, sand: 0.4, gravel: 0.4, snow: 0.3, leaves: 0.2,
+  wood: 0.75, planks: 0.55, crafting_table: 0.6, stone: 1.1, cobblestone: 1.0,
+  coal_ore: 1.3, iron_ore: 1.6, gold_ore: 1.6, diamond_ore: 2.2,
+  furnace: 1.2, glass: 0.3, wool: 0.4, ice: 0.5
+};
+const DEFAULT_HARDNESS = 0.6;
+const PICKAXE_SPEED = { none: 1, wood: 1.4, stone: 1.9, iron: 2.6, diamond: 3.4 };
+const AXE_SPEED = { none: 1, wood: 1.4, stone: 1.9, iron: 2.6, diamond: 3.4 };
+function miningDurationFor(material) {
+  const base = BLOCK_HARDNESS[material] != null ? BLOCK_HARDNESS[material] : DEFAULT_HARDNESS;
+  let speed = 1;
+  if (MINING_REQUIREMENT[material] || material === 'stone' || material.endsWith('_ore')) {
+    speed = PICKAXE_SPEED[inventory.tools.pickaxe || 'none'];
+  } else if (material === 'wood') {
+    speed = AXE_SPEED[inventory.tools.axe || 'none'];
+  }
+  return Math.max(0.12, base / speed);
+}
 const ORE_DROPS = { coal_ore: 'coal', iron_ore: 'raw_iron', gold_ore: 'raw_gold', diamond_ore: 'diamond' };
 
 function renderHotbar() {
@@ -921,7 +1034,12 @@ function renderCraftMenu() {
 function toggleCraftMenu() {
   craftMenuOpen = !craftMenuOpen;
   craftMenuEl.style.display = craftMenuOpen ? 'flex' : 'none';
-  if (craftMenuOpen) { renderCraftMenu(); try { controls.unlock(); } catch (e) { /* not locked */ } }
+  if (craftMenuOpen) {
+    renderCraftMenu();
+    try { controls.unlock(); } catch (e) { /* not locked */ }
+  } else if (gameStarted && !invScreenOpen) {
+    try { controls.lock(); } catch (e) { /* no mouse available */ }
+  }
 }
 
 // ---------- Inventory screen ----------
@@ -1023,6 +1141,9 @@ function toggleInventoryScreen() {
     try { controls.unlock(); } catch (e) { /* not locked */ }
   } else {
     invSearchEl.blur();
+    if (gameStarted && !craftMenuOpen) {
+      try { controls.lock(); } catch (e) { /* no mouse available */ }
+    }
   }
 }
 
@@ -1112,7 +1233,7 @@ document.addEventListener('keydown', (e) => {
     case 'KeyV': drinkPotion(); break;
     case 'KeyT': tradeWithVillager(); break;
     case 'KeyH': goFishing(); break;
-    case 'KeyJ': if (gameStarted && !spectatorMode && !gameOver) breakOrAttack(); break;
+    case 'KeyJ': if (gameStarted && !spectatorMode && !gameOver) minePressed = true; break;
     case 'KeyK': if (gameStarted && !spectatorMode && !gameOver) placeBlock(); break;
   }
 });
@@ -1128,6 +1249,7 @@ document.addEventListener('keyup', (e) => {
     case 'ArrowDown': look.down = false; break;
     case 'Space': move.up = false; break;
     case 'ShiftLeft': move.down = false; break;
+    case 'KeyJ': minePressed = false; break;
   }
 });
 
@@ -1139,43 +1261,95 @@ document.addEventListener('contextmenu', (e) => e.preventDefault());
 
 const SWORD_DAMAGE = { none: 3, wood: 6, stone: 10, iron: 15, diamond: 22 };
 
-function breakOrAttack() {
+let mining = null; // { x, y, z, material, startTime, duration }
+let minePressed = false;
+let lastInstantActionTime = 0;
+const INSTANT_ACTION_COOLDOWN = 500;
+
+function cancelMining() {
+  mining = null;
+  crackMesh.visible = false;
+}
+
+// Called every frame while J is held: attacks/activates are instant (cooldown-limited),
+// but breaking a block now takes time and shows a growing crack overlay, like Minecraft.
+function updateMining() {
+  if (!minePressed || !gameStarted || spectatorMode || gameOver || craftMenuOpen || invScreenOpen) {
+    if (mining) cancelMining();
+    return;
+  }
   raycaster.setFromCamera(centerVec, camera);
 
   const entityMeshes = Array.from(remoteEntities.values()).map((m) => m.mesh);
   const entityHits = raycaster.intersectObjects(entityMeshes, true);
   if (entityHits.length > 0) {
+    if (mining) cancelMining();
     const hitGroup = findEntityGroup(entityHits[0].object);
     const entityId = hitGroup && hitGroup.userData.entityId;
-    if (entityId) {
+    if (entityId && performance.now() - lastInstantActionTime > INSTANT_ACTION_COOLDOWN) {
+      lastInstantActionTime = performance.now();
       let dmg = SWORD_DAMAGE[inventory.tools.sword || 'none'];
       if (inventory.tools.swordEnchanted) dmg += TOOL_ENCHANT_BONUS.sword;
       if (performance.now() < strengthBuffUntil) dmg += 3;
       socket.emit('attackEntity', { entityId, damage: dmg });
       sfx.attack();
+      triggerHandSwing();
       unlockAchievement('first_attack', 'Fighter');
-      return;
     }
+    return;
   }
 
   const hits = raycaster.intersectObjects(Object.values(meshes));
-  if (hits.length === 0) return;
+  if (hits.length === 0) { if (mining) cancelMining(); return; }
   const hit = hits[0];
   const material = meshOwner(hit.object);
   const pos = meshUserData[material].positions[hit.instanceId];
-  if (!pos || UNBREAKABLE.has(material)) return;
+  if (!pos || UNBREAKABLE.has(material)) { if (mining) cancelMining(); return; }
 
-  if (material === 'lever' || material === 'plate') { activateNearestMechanism(pos); return; }
+  if (material === 'lever' || material === 'plate') {
+    if (mining) cancelMining();
+    if (performance.now() - lastInstantActionTime > INSTANT_ACTION_COOLDOWN) {
+      lastInstantActionTime = performance.now();
+      activateNearestMechanism(pos);
+      triggerHandSwing();
+    }
+    return;
+  }
+
   const mineReq = MINING_REQUIREMENT[material];
   if (mineReq) {
     const have = inventory.tools.pickaxe;
     if (!have || TOOL_TIER_RANK[have] < TOOL_TIER_RANK[mineReq]) {
+      if (mining) cancelMining();
       showToast(`Need a ${mineReq} pickaxe or better`);
+      minePressed = false;
       return;
     }
   }
 
-  removeBlockInstance(pos.x, pos.y, pos.z);
+  if (mining && (mining.x !== pos.x || mining.y !== pos.y || mining.z !== pos.z)) cancelMining();
+
+  if (!mining) {
+    mining = { x: pos.x, y: pos.y, z: pos.z, material, startTime: performance.now(), duration: miningDurationFor(material) * 1000 };
+    crackMesh.position.set(pos.x, pos.y, pos.z);
+    crackMesh.visible = true;
+    crackMat.map = crackTextures[0];
+    crackMat.needsUpdate = true;
+    triggerHandSwing();
+  }
+
+  const progress = Math.min(1, (performance.now() - mining.startTime) / mining.duration);
+  const stage = Math.min(CRACK_STAGES, Math.floor(progress * CRACK_STAGES));
+  if (crackMat.map !== crackTextures[stage]) { crackMat.map = crackTextures[stage]; crackMat.needsUpdate = true; triggerHandSwing(); }
+
+  if (progress >= 1) {
+    finishBreakingBlock(mining.x, mining.y, mining.z, mining.material);
+    cancelMining();
+  }
+}
+
+function finishBreakingBlock(x, y, z, material) {
+  removeBlockInstance(x, y, z);
   const AXE_WOOD_BONUS = { none: 1, wood: 2, stone: 3, iron: 4, diamond: 5 };
   if (material === 'wheat_ripe') {
     inventory.wheat = (inventory.wheat || 0) + 1;
@@ -1200,9 +1374,9 @@ function breakOrAttack() {
   }
   renderHotbar();
   document.getElementById('apple-count').textContent = `Apples: ${inventory.apple} | Meat: ${inventory.meat} (F to eat)`;
-  socket.emit('blockEdit', { x: pos.x, y: pos.y, z: pos.z, action: 'remove' });
+  socket.emit('blockEdit', { x, y, z, action: 'remove' });
   sfx.breakBlock();
-  spawnBreakParticles(pos.x, pos.y, pos.z, material);
+  spawnBreakParticles(x, y, z, material);
   unlockAchievement('first_break', 'Block Breaker');
 }
 
@@ -1234,6 +1408,7 @@ function placeBlock() {
   addBlockInstance(nx, ny, nz, placeMaterial, chunkKey);
   socket.emit('blockEdit', { x: nx, y: ny, z: nz, action: 'add', material: placeMaterial });
   sfx.placeBlock();
+  triggerHandSwing();
   if (placeMaterial === 'sand') fallingBlocks.add(bkey(nx, ny, nz));
 
   if (placeMaterial === 'portal') portalCooldownUntil = Math.max(portalCooldownUntil, performance.now());
@@ -1287,8 +1462,11 @@ function placeFluidCell(x, y, z, material) {
 
 document.addEventListener('mousedown', (e) => {
   if (!gameStarted || craftMenuOpen || invScreenOpen || spectatorMode || gameOver) return;
-  if (e.button === 0) breakOrAttack();
+  if (e.button === 0) minePressed = true;
   else if (e.button === 2) placeBlock();
+});
+document.addEventListener('mouseup', (e) => {
+  if (e.button === 0) minePressed = false;
 });
 
 // ---------- Extra interactions: bed/sleep, breeding, creative, minecart, bow ----------
@@ -1905,7 +2083,12 @@ function animate() {
   document.getElementById('hunger-fill').style.width = Math.max(0, (myHunger / 20) * 100) + '%';
   document.getElementById('dead-banner').style.display = myHealth <= 0 ? 'flex' : 'none';
 
+  updateMining();
+  updateHandView();
+  renderer.clear();
   renderer.render(scene, camera);
+  renderer.clearDepth();
+  if (handScene.visible) renderer.render(handScene, handCamera);
 }
 
 // periodic position broadcast
