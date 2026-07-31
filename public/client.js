@@ -66,6 +66,13 @@ renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 renderer.autoClear = false; // main scene + a separate overlay pass for the first-person hand
 document.body.appendChild(renderer.domElement);
 
+// Bloom pass - only truly bright things (lava, the sun/glow sprites) cross the
+// threshold and glow, ordinary lit blocks are unaffected.
+const composer = new THREE.EffectComposer(renderer);
+composer.addPass(new THREE.RenderPass(scene, camera));
+const bloomPass = new THREE.UnrealBloomPass(new THREE.Vector2(window.innerWidth, window.innerHeight), 0.65, 0.4, 0.87);
+composer.addPass(bloomPass);
+
 const hemiLight = new THREE.HemisphereLight(0xbfe3ff, 0x3a2f28, 1.0);
 scene.add(hemiLight);
 const sunLight = new THREE.DirectionalLight(0xfff1d6, 1.0);
@@ -173,6 +180,7 @@ window.addEventListener('resize', () => {
     handCamera.updateProjectionMatrix();
   }
   renderer.setSize(window.innerWidth, window.innerHeight);
+  composer.setSize(window.innerWidth, window.innerHeight);
 });
 
 // ---------- Weather particles (rain/snow) ----------
@@ -351,17 +359,24 @@ const FACE_BRIGHTNESS = { top: 1.0, side: 0.8, bottom: 0.55 };
 // BoxGeometry face/group order: +x, -x, +y, -y, +z, -z (right, left, top, bottom, front, back)
 const FACE_ORDER = ['side', 'side', 'top', 'bottom', 'side', 'side'];
 
-function buildFaceMaterials(material, extraProps) {
+function buildFaceMaterials(material, extraProps, MatClass) {
   const faceMap = FACE_TEXTURES[material];
+  const Ctor = MatClass || THREE.MeshLambertMaterial;
   return FACE_ORDER.map((face) => {
     const texKey = faceMap ? faceMap[face] : material;
     const brightness = FACE_BRIGHTNESS[face];
     const shade = Math.round(brightness * 255);
-    return new THREE.MeshLambertMaterial(Object.assign({
+    return new Ctor(Object.assign({
       map: blockTextures[texKey],
       color: new THREE.Color(shade / 255, shade / 255, shade / 255)
     }, extraProps));
   });
+}
+
+let waterFlowT = 0;
+function updateWaterFlow(dt) {
+  waterFlowT += dt;
+  blockTextures.water.offset.set(Math.sin(waterFlowT * 0.15) * 0.06, (waterFlowT * 0.035) % 1);
 }
 
 function createMeshFor(material, capacity) {
@@ -369,7 +384,8 @@ function createMeshFor(material, capacity) {
   if (material === 'lava') {
     mat = new THREE.MeshBasicMaterial({ map: blockTextures[material] }); // unlit - glows in the dark
   } else if (material === 'water') {
-    mat = buildFaceMaterials(material, { transparent: true, opacity: 0.78 });
+    // Phong (not Lambert) so sunlight puts a moving specular glint on the surface, like real water.
+    mat = buildFaceMaterials(material, { transparent: true, opacity: 0.78, specular: 0x99ccff, shininess: 90 }, THREE.MeshPhongMaterial);
   } else {
     mat = buildFaceMaterials(material);
   }
@@ -2172,8 +2188,8 @@ function animate() {
 
   updateMining();
   updateHandView();
-  renderer.clear();
-  renderer.render(scene, camera);
+  updateWaterFlow(dt);
+  composer.render();
   renderer.clearDepth();
   if (handScene.visible) renderer.render(handScene, handCamera);
 }
