@@ -1052,19 +1052,20 @@ function blockOverlapsPlayer(bx, by, bz) {
 const HOTBAR_ORDER = ['dirt', 'stone', 'grass', 'wood', 'leaves', 'planks'];
 function makeDefaultInventory() {
   return {
-    grass: 0, dirt: 10, stone: 5, wood: 0, leaves: 0, planks: 0, apple: 2, meat: 0,
-    bed: 0, bow: 0, rail: 0, lever: 0, plate: 0, door: 0, portal: 1,
-    wheat_seeds: 0, wheat: 0, water: 1, lava: 1,
+    grass: 0, dirt: 0, stone: 0, wood: 0, leaves: 0, planks: 0, apple: 0, meat: 0,
+    bed: 0, bow: 0, rail: 0, lever: 0, plate: 0, door: 0, portal: 0,
+    wheat_seeds: 0, wheat: 0, water: 0, lava: 0,
     sand: 0, furnace: 0, glass: 0, wool: 0, stairs: 0, slab: 0, cooked_meat: 0,
     enchant_table: 0, brewing_stand: 0, piston: 0, hopper: 0,
     potion_speed: 0, potion_strength: 0, fish: 0, carrot: 0, potato: 0, carrot_seeds: 0, potato_seeds: 0,
     crafting_table: 0, coal: 0, raw_iron: 0, raw_gold: 0, iron_ingot: 0, gold_ingot: 0, diamond: 0,
-    torch: 0, boat: 0, tnt: 0,
+    torch: 0, boat: 0, tnt: 0, bucket: 0,
     tools: { pickaxe: null, axe: null, sword: null, armor: null }
   };
 }
 const inventory = makeDefaultInventory();
 let selectedMaterial = 'dirt';
+let selectedHotbarIndex = 0;
 let heldSpecial = null; // 'bed' | 'lever' | 'plate' | 'door' | 'rail' | 'portal' | 'bow' | 'wheat_seeds' | null
 const hotbarEl = document.getElementById('hotbar');
 const TOOL_TIER_RANK = { wood: 1, stone: 2, iron: 3, diamond: 4, wool: 1, gold: 2 };
@@ -1148,7 +1149,8 @@ const RECIPES = [
   { id: 'armor_iron', name: 'Iron Armor (5 iron ingots)', cost: { iron_ingot: 5 }, tool: { armor: 'iron' }, requireTool: { armor: 'gold' } },
   { id: 'armor_diamond', name: 'Diamond Armor (5 diamonds)', cost: { diamond: 5 }, tool: { armor: 'diamond' }, requireTool: { armor: 'iron' } },
   { id: 'boat', name: 'Boat (5 wood)', cost: { wood: 5 }, give: { boat: 1 } },
-  { id: 'tnt', name: 'TNT (4 sand + 1 coal)', cost: { sand: 4, coal: 1 }, give: { tnt: 1 } }
+  { id: 'tnt', name: 'TNT (4 sand + 1 coal)', cost: { sand: 4, coal: 1 }, give: { tnt: 1 } },
+  { id: 'bucket', name: 'Bucket (3 iron ingots)', cost: { iron_ingot: 3 }, give: { bucket: 1 } }
 ];
 let craftMenuOpen = false;
 let craftSelectedIndex = 0;
@@ -1175,7 +1177,7 @@ function canAfford(recipe) {
 
 const HELD_SPECIAL_ITEMS = new Set(['bed', 'lever', 'plate', 'door', 'rail', 'portal', 'bow',
   'furnace', 'glass', 'wool', 'stairs', 'slab', 'enchant_table', 'brewing_stand', 'piston', 'hopper',
-  'crafting_table', 'tnt']);
+  'crafting_table', 'tnt', 'bucket']);
 function craftRecipe(recipe) {
   if (recipe.needsTable !== false && !findNearbyBlockOfType('crafting_table', 4)) {
     showToast('Need a crafting table nearby');
@@ -1239,13 +1241,15 @@ const ITEM_DISPLAY = {
   coal: { name: 'Coal', color: 0x2b2b2b }, raw_iron: { name: 'Raw Iron', color: 0xb08968 },
   raw_gold: { name: 'Raw Gold', color: 0xe6c235 }, iron_ingot: { name: 'Iron Ingot', color: 0xd8d8d8 },
   gold_ingot: { name: 'Gold Ingot', color: 0xffd700 }, diamond: { name: 'Diamond', color: 0x5eead4 },
-  torch: { name: 'Torch' }, boat: { name: 'Boat', color: 0x8a5a2b }, tnt: { name: 'TNT' }
+  torch: { name: 'Torch' }, boat: { name: 'Boat', color: 0x8a5a2b }, tnt: { name: 'TNT' },
+  bucket: { name: 'Bucket', color: 0xb0b0b0 }
 };
 let invScreenOpen = false;
 const invScreenEl = document.getElementById('inv-screen');
 const invGridEl = document.getElementById('inv-grid');
 const invToolsEl = document.getElementById('inv-tools');
 const invSearchEl = document.getElementById('inv-search');
+const invSwapHintEl = document.getElementById('inv-swap-hint');
 
 function itemColorFor(key) {
   const info = ITEM_DISPLAY[key];
@@ -1262,17 +1266,34 @@ const discoveredItems = new Set();
 function renderInventoryScreen() {
   const query = invSearchEl.value.trim().toLowerCase();
   invGridEl.innerHTML = '';
+  if (invSwapHintEl) {
+    invSwapHintEl.textContent =
+      `Click an item to put it in hotbar slot ${selectedHotbarIndex + 1} (currently ${itemNameFor(HOTBAR_ORDER[selectedHotbarIndex])}) - press 1-6 to pick a different slot`;
+  }
   for (const key in ITEM_DISPLAY) {
     const count = inventory[key] || 0;
     if (count > 0) discoveredItems.add(key);
     const discovered = discoveredItems.has(key);
     if (query && (!discovered || !itemNameFor(key).toLowerCase().includes(query))) continue;
     const cell = document.createElement('div');
-    cell.className = 'inv-cell' + (discovered ? '' : ' inv-empty');
+    const slotIdx = HOTBAR_ORDER.indexOf(key);
+    cell.className = 'inv-cell' + (discovered ? '' : ' inv-empty') + (slotIdx !== -1 ? ' inv-in-hotbar' : '');
     if (discovered) {
       cell.innerHTML = `<span class="inv-count">${count}</span>
         <span class="swatch" style="background:#${swatchHex(key)}"></span>
-        <span class="inv-name">${itemNameFor(key)}</span>`;
+        <span class="inv-name">${itemNameFor(key)}${slotIdx !== -1 ? ' (slot ' + (slotIdx + 1) + ')' : ''}</span>`;
+      cell.addEventListener('click', () => {
+        // Hotbar slots hold placeable blocks (they get placed straight into the
+        // world) - non-block items like food/ingots/tools already have their
+        // own way to be held and would crash placeBlock if forced in here.
+        if (!MATERIAL_COLORS[key]) { showToast(`${itemNameFor(key)} can't go on the hotbar`); return; }
+        HOTBAR_ORDER[selectedHotbarIndex] = key;
+        selectedMaterial = key;
+        heldSpecial = null;
+        renderHotbar();
+        renderInventoryScreen();
+        showToast(`Slot ${selectedHotbarIndex + 1}: ${itemNameFor(key)}`);
+      });
     }
     invGridEl.appendChild(cell);
   }
@@ -1366,6 +1387,9 @@ document.addEventListener('keydown', (e) => {
       if (next >= 0 && next < POCKET_RECIPES.length) { pocketSelectedIndex = next; renderPocketCraft(); }
     } else if (e.code === 'Enter') {
       craftPocketSelected();
+    } else if (e.code.startsWith('Digit') && e.code !== 'Digit0') {
+      const idx = Number(e.code.slice(5)) - 1;
+      if (idx >= 0 && idx < 6) { selectedHotbarIndex = idx; renderInventoryScreen(); }
     }
     return;
   }
@@ -1387,6 +1411,7 @@ document.addEventListener('keydown', (e) => {
     case 'ShiftLeft': move.down = true; break;
     case 'Digit1': case 'Digit2': case 'Digit3': case 'Digit4': case 'Digit5': case 'Digit6': {
       const idx = Number(e.code.slice(5)) - 1;
+      selectedHotbarIndex = idx;
       if (HOTBAR_ORDER[idx]) { selectedMaterial = HOTBAR_ORDER[idx]; heldSpecial = null; renderHotbar(); }
       break;
     }
@@ -1565,6 +1590,7 @@ function finishBreakingBlock(x, y, z, material) {
 
 function placeBlock() {
   if (heldSpecial === 'bow') { shootBow(); return; }
+  if ((heldSpecial || selectedMaterial) === 'bucket') { scoopBucket(); return; }
 
   raycaster.setFromCamera(centerVec, camera);
   const hits = raycaster.intersectObjects(Object.values(meshes));
@@ -1599,9 +1625,37 @@ function placeBlock() {
   if (placeMaterial === 'water' || placeMaterial === 'lava') {
     spreadFluid(nx, ny, nz, placeMaterial);
     unlockAchievement('first_fluid', 'Plumber');
+    // placing empties the bucket - give the empty one back, same as real Minecraft
+    inventory.bucket = (inventory.bucket || 0) + 1;
+    heldSpecial = 'bucket';
+    renderHotbar();
   }
   if (placeMaterial === 'tnt') showToast('TNT armed! Get clear...');
   unlockAchievement('first_place', 'Builder');
+}
+
+// Scooping is how water/lava buckets actually get filled - there is no other
+// source, so without this a zeroed starting inventory would make buckets a
+// permanent dead end once the first charge is used.
+function scoopBucket() {
+  if ((inventory.bucket || 0) <= 0) { showToast('No empty bucket'); return; }
+  raycaster.setFromCamera(centerVec, camera);
+  const hits = raycaster.intersectObjects(Object.values(meshes));
+  if (hits.length === 0) return;
+  const hit = hits[0];
+  const material = meshOwner(hit.object);
+  if (material !== 'water' && material !== 'lava') { showToast('Nothing to scoop here'); return; }
+  const pos = meshUserData[material].positions[hit.instanceId];
+  if (!pos) return;
+  removeBlockInstance(pos.x, pos.y, pos.z);
+  socket.emit('blockEdit', { x: pos.x, y: pos.y, z: pos.z, action: 'remove' });
+  inventory.bucket -= 1;
+  inventory[material] = (inventory[material] || 0) + 1;
+  heldSpecial = material;
+  renderHotbar();
+  showToast(`Scooped ${material}`);
+  sfx.splash();
+  triggerHandSwing();
 }
 
 // Simple one-shot flood-fill spread (not a continuous simulation) - falls
