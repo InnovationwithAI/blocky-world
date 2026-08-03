@@ -30,7 +30,10 @@ const COLORS = [0xff5555, 0x5588ff, 0xffaa00, 0x55ff88, 0xcc55ff, 0x55ffff];
 let colorIdx = 0;
 let entityIdCounter = 1;
 
-const HOSTILE_KINDS = new Set(['zombie', 'skeleton', 'boss', 'spider', 'enderman']);
+const HOSTILE_KINDS = new Set(['zombie', 'skeleton', 'boss', 'spider', 'enderman', 'creeper']);
+const CREEPER_FUSE_MS = 1200;
+const CREEPER_FUSE_RANGE_SQ = 9; // ~3 blocks, horizontal
+const EXPLOSION_RADIUS = 2;
 const CROP_GROWTH_MS = 45 * 1000;
 
 function randomSpawn() {
@@ -255,8 +258,9 @@ setInterval(() => {
     const mz = target.z + Math.sin(angle) * dist;
     const h = World.heightAt(Math.round(mx), Math.round(mz));
     const roll = Math.random();
-    const kind = roll < 0.4 ? 'zombie' : roll < 0.7 ? 'skeleton' : roll < 0.9 ? 'spider' : 'enderman';
-    entities['e' + (entityIdCounter++)] = { kind, x: mx, y: h + 1.5, z: mz, health: kind === 'spider' ? 12 : 20, dim: 'overworld' };
+    const kind = roll < 0.32 ? 'zombie' : roll < 0.56 ? 'skeleton' : roll < 0.72 ? 'spider' : roll < 0.86 ? 'enderman' : 'creeper';
+    const health = kind === 'spider' ? 12 : kind === 'creeper' ? 15 : 20;
+    entities['e' + (entityIdCounter++)] = { kind, x: mx, y: h + 1.5, z: mz, health, dim: 'overworld' };
   }
   if (!night) {
     for (const id in entities) if (entities[id].dim === 'overworld' && HOSTILE_KINDS.has(entities[id].kind)) delete entities[id];
@@ -313,7 +317,7 @@ setInterval(() => {
           const len = Math.hypot(dx, dz) || 1;
           const isRanged = ent.kind === 'skeleton';
           const keepDistance = isRanged ? 6 : 0;
-          const speed = (ent.kind === 'boss' ? 1.6 : ent.kind === 'spider' ? 1.8 : 1.2) * (TICK_MS / 1000);
+          const speed = (ent.kind === 'boss' ? 1.6 : ent.kind === 'spider' ? 1.8 : ent.kind === 'creeper' ? 1.3 : 1.2) * (TICK_MS / 1000);
           if (len > keepDistance + 1) {
             ent.x += (dx / len) * speed;
             ent.z += (dz / len) * speed;
@@ -322,12 +326,24 @@ setInterval(() => {
         }
         const dx2 = nearest.x - ent.x, dz2 = nearest.z - ent.z;
         const nd2 = dx2 * dx2 + dz2 * dz2;
-        const dmg = ent.kind === 'boss' ? 4 : 1;
-        const range = ent.kind === 'skeleton' ? 49 : 2.25;
-        const cooldown = ent.kind === 'skeleton' ? 2200 : 1800;
-        if (nd2 < range && (!ent.lastHit || Date.now() - ent.lastHit > cooldown)) {
-          nearest.health = Math.max(0, nearest.health - dmg);
-          ent.lastHit = Date.now();
+        if (ent.kind === 'creeper') {
+          if (nd2 < CREEPER_FUSE_RANGE_SQ) {
+            ent.fuseT = (ent.fuseT || 0) + TICK_MS;
+            if (ent.fuseT >= CREEPER_FUSE_MS) {
+              explodeCreeper(ent);
+              delete entities[id];
+            }
+          } else {
+            ent.fuseT = 0;
+          }
+        } else {
+          const dmg = ent.kind === 'boss' ? 4 : 1;
+          const range = ent.kind === 'skeleton' ? 49 : 2.25;
+          const cooldown = ent.kind === 'skeleton' ? 2200 : 1800;
+          if (nd2 < range && (!ent.lastHit || Date.now() - ent.lastHit > cooldown)) {
+            nearest.health = Math.max(0, nearest.health - dmg);
+            ent.lastHit = Date.now();
+          }
         }
       }
     } else if (ent.kind === 'cow' || ent.kind === 'pig') {
@@ -395,6 +411,53 @@ setInterval(() => {
 function chunkEditKeyFor(x, z) {
   const [cx, cz] = World.worldToChunk(x, z);
   return cx + ',' + cz;
+}
+
+// Damages nearby players (falloff with distance) and blows a small crater out
+// of the terrain, same as a real chunk edit so it persists and syncs like any
+// other block removal.
+function explodeCreeper(ent) {
+  const cx = Math.round(ent.x), cy = Math.round(ent.y - 1.5), cz = Math.round(ent.z);
+  for (const p of Object.values(players)) {
+    if (p.dim !== ent.dim) continue;
+    const d = Math.hypot(p.x - ent.x, p.y - ent.y, p.z - ent.z);
+    if (d < EXPLOSION_RADIUS + 1.5) {
+      const dmg = Math.round(10 * (1 - d / (EXPLOSION_RADIUS + 1.5)));
+      if (dmg > 0) p.health = Math.max(0, p.health - dmg);
+    }
+  }
+
+  const removed = [];
+  const r = EXPLOSION_RADIUS;
+  for (let dx = -r; dx <= r; dx++) {
+    for (let dy = -r; dy <= r; dy++) {
+      for (let dz = -r; dz <= r; dz++) {
+        if (dx * dx + dy * dy + dz * dz > r * r + 1) continue;
+        const y = cy + dy;
+        if (y <= World.BEDROCK_Y) continue;
+        removed.push({ x: cx + dx, y, z: cz + dz });
+      }
+    }
+  }
+  for (const { x, y, z } of removed) {
+    const key = ent.dim === 'nether' ? NETHER_KEY : chunkEditKeyFor(x, z);
+    if (!chunkEdits[key]) chunkEdits[key] = {};
+    let ek;
+    if (ent.dim === 'nether') {
+      ek = x + ',' + y + ',' + z;
+    } else {
+      const [ecx, ecz] = World.worldToChunk(x, z);
+      ek = (x - ecx * World.CHUNK_SIZE) + ',' + y + ',' + (z - ecz * World.CHUNK_SIZE);
+    }
+    chunkEdits[key][ek] = { action: 'remove' };
+  }
+
+  for (const [id, sock] of io.sockets.sockets) {
+    const p = players[id];
+    if (!p || p.dim !== ent.dim) continue;
+    sock.emit('explosion', { x: ent.x, y: ent.y, z: ent.z, radius: EXPLOSION_RADIUS });
+    for (const { x, y, z } of removed) sock.emit('blockEdit', { x, y, z, action: 'remove' });
+  }
 }
 
 server.listen(PORT, () => console.log('Server running on http://localhost:' + PORT));

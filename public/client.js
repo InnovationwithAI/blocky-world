@@ -50,7 +50,11 @@ const sfx = {
   attack: () => playTone({ freq: 500, slideTo: 250, duration: 0.1, type: 'triangle', volume: 0.14 }),
   splash: () => playNoise({ duration: 0.2, volume: 0.15, filterFreq: 2000 }),
   nightfall: () => playTone({ freq: 220, slideTo: 110, duration: 1.2, type: 'sine', volume: 0.08 }),
-  daybreak: () => playTone({ freq: 330, slideTo: 440, duration: 1.2, type: 'sine', volume: 0.08 })
+  daybreak: () => playTone({ freq: 330, slideTo: 440, duration: 1.2, type: 'sine', volume: 0.08 }),
+  explosion: () => {
+    playNoise({ duration: 0.5, volume: 0.35, filterFreq: 300 });
+    playTone({ freq: 90, slideTo: 40, duration: 0.4, type: 'sawtooth', volume: 0.2 });
+  }
 };
 
 // ---------- Scene setup ----------
@@ -156,7 +160,28 @@ function spawnBreakParticles(x, y, z, material) {
     activeParticles.push({
       mesh,
       velocity: new THREE.Vector3((Math.random() - 0.5) * 2.5, Math.random() * 2.5 + 1, (Math.random() - 0.5) * 2.5),
-      life: 0.6
+      life: 0.6, maxLife: 0.6
+    });
+  }
+}
+const explosionParticleMats = [
+  new THREE.MeshBasicMaterial({ color: 0x2b2b2b }),
+  new THREE.MeshBasicMaterial({ color: 0xff8a3d }),
+  new THREE.MeshBasicMaterial({ color: 0x555555 })
+];
+function spawnExplosionParticles(x, y, z) {
+  for (let i = 0; i < 26; i++) {
+    const mat = explosionParticleMats[i % explosionParticleMats.length];
+    const mesh = new THREE.Mesh(particleGeo, mat);
+    mesh.position.set(x, y, z);
+    scene.add(mesh);
+    const angle = Math.random() * Math.PI * 2;
+    const upSpeed = Math.random() * 4 + 2;
+    const outSpeed = Math.random() * 4 + 1;
+    activeParticles.push({
+      mesh,
+      velocity: new THREE.Vector3(Math.cos(angle) * outSpeed, upSpeed, Math.sin(angle) * outSpeed),
+      life: 0.9, maxLife: 0.9
     });
   }
 }
@@ -167,7 +192,7 @@ function updateParticles(dt) {
     if (p.life <= 0) { scene.remove(p.mesh); activeParticles.splice(i, 1); continue; }
     p.velocity.y -= 9 * dt;
     p.mesh.position.addScaledVector(p.velocity, dt);
-    p.mesh.scale.setScalar(Math.max(0, p.life / 0.6));
+    p.mesh.scale.setScalar(Math.max(0, p.life / p.maxLife));
   }
 }
 scene.fog = new THREE.Fog(0x7ec0ee, 50, 110);
@@ -237,7 +262,7 @@ const MATERIAL_COLORS = {
   enchant_table: 0x2d6b5e, brewing_stand: 0x6b4a8a, piston: 0x7a8a5a, hopper: 0x4a4a4a,
   nether_brick: 0x3a1414,
   coal_ore: 0x36393d, iron_ore: 0xb08968, gold_ore: 0xe6c235, diamond_ore: 0x5eead4,
-  crafting_table: 0x8a5a2b
+  crafting_table: 0x8a5a2b, torch: 0xffcc66
 };
 const UNBREAKABLE = new Set(['bedrock', 'lava', 'water']);
 const boxGeo = new THREE.BoxGeometry(1, 1, 1);
@@ -379,9 +404,41 @@ function updateWaterFlow(dt) {
   blockTextures.water.offset.set(Math.sin(waterFlowT * 0.15) * 0.06, (waterFlowT * 0.035) % 1);
 }
 
+// Torches are real light sources, but a THREE.PointLight per torch would not
+// scale - instead keep a small pool of lights and each frame hand them to
+// whichever placed torches are nearest the camera, the rest go dark.
+const TORCH_LIGHT_RANGE = 14;
+const torchLightPool = [];
+for (let i = 0; i < 6; i++) {
+  const light = new THREE.PointLight(0xffaa55, 1.1, 9, 2);
+  light.castShadow = false;
+  scene.add(light);
+  torchLightPool.push(light);
+}
+function updateTorchLights() {
+  if (torchPositions.size === 0) {
+    for (const light of torchLightPool) light.visible = false;
+    return;
+  }
+  const near = [];
+  for (const k of torchPositions) {
+    const [x, y, z] = k.split(',').map(Number);
+    const d = (x - camera.position.x) ** 2 + (y - camera.position.y) ** 2 + (z - camera.position.z) ** 2;
+    if (d < TORCH_LIGHT_RANGE * TORCH_LIGHT_RANGE) near.push({ x, y, z, d });
+  }
+  near.sort((a, b) => a.d - b.d);
+  for (let i = 0; i < torchLightPool.length; i++) {
+    const light = torchLightPool[i];
+    const t = near[i];
+    if (!t) { light.visible = false; continue; }
+    light.visible = true;
+    light.position.set(t.x, t.y, t.z);
+  }
+}
+
 function createMeshFor(material, capacity) {
   let mat;
-  if (material === 'lava') {
+  if (material === 'lava' || material === 'torch') {
     mat = new THREE.MeshBasicMaterial({ map: blockTextures[material] }); // unlit - glows in the dark
   } else if (material === 'water') {
     // Phong (not Lambert) so sunlight puts a moving specular glint on the surface, like real water.
@@ -515,6 +572,7 @@ const plateBlocks = new Set();    // "x,y,z" keys of placed pressure plates
 const doorPositions = new Set();  // "x,y,z" keys of doors ever placed (open or closed)
 const pistonPositions = new Set(); // "x,y,z" keys of placed pistons
 const hopperPositions = new Set(); // "x,y,z" keys of placed hoppers
+const torchPositions = new Set(); // "x,y,z" keys of placed torches
 const fallingBlocks = new Set();  // "x,y,z" keys of sand blocks that may need to fall
 
 function bkey(x, y, z) { return x + ',' + y + ',' + z; }
@@ -548,6 +606,7 @@ function addBlockInstance(x, y, z, material, chunkKey) {
   if (material === 'door') doorPositions.add(k);
   if (material === 'piston') pistonPositions.add(k);
   if (material === 'hopper') hopperPositions.add(k);
+  if (material === 'torch') torchPositions.add(k);
 }
 
 function removeBlockInstance(x, y, z) {
@@ -577,6 +636,7 @@ function removeBlockInstance(x, y, z) {
   if (colSet) { colSet.delete(y); if (colSet.size === 0) columnBlocks.delete(ck); }
   portalBlocks.delete(k);
   plateBlocks.delete(k);
+  torchPositions.delete(k);
   const aboveEntry = blockAt.get(bkey(x, y + 1, z));
   if (aboveEntry && aboveEntry.material === 'sand') fallingBlocks.add(bkey(x, y + 1, z));
   return entry.material;
@@ -760,7 +820,8 @@ const ENTITY_LOOKS = {
   pig: { body: 0xe8a0a8, head: 0xf0b8c0, scale: 0.9 },
   spider: { body: 0x1a1414, head: 0x2a1e1e, scale: 0.85 },
   enderman: { body: 0x111111, head: 0x8e2de2, scale: 1.6 },
-  villager: { body: 0x8a6a4a, head: 0xd9b98a, scale: 1.05 }
+  villager: { body: 0x8a6a4a, head: 0xd9b98a, scale: 1.05 },
+  creeper: { body: 0x3fa34d, head: 0x2e8b3d, scale: 1.1 }
 };
 function makeEntityMesh(kind) {
   const look = ENTITY_LOOKS[kind] || ENTITY_LOOKS.zombie;
@@ -884,6 +945,10 @@ socket.on('overworldReturn', ({ x, y, z }) => {
   portalCooldownUntil = performance.now() + 2000;
   showToast('Back in the Overworld');
 });
+socket.on('explosion', ({ x, y, z }) => {
+  spawnExplosionParticles(x, y, z);
+  sfx.explosion();
+});
 socket.on('lootDrop', ({ kind }) => {
   if (kind === 'cow' || kind === 'pig') {
     inventory.meat = (inventory.meat || 0) + 2;
@@ -994,6 +1059,7 @@ function makeDefaultInventory() {
     enchant_table: 0, brewing_stand: 0, piston: 0, hopper: 0,
     potion_speed: 0, potion_strength: 0, fish: 0, carrot: 0, potato: 0, carrot_seeds: 0, potato_seeds: 0,
     crafting_table: 0, coal: 0, raw_iron: 0, raw_gold: 0, iron_ingot: 0, gold_ingot: 0, diamond: 0,
+    torch: 0,
     tools: { pickaxe: null, axe: null, sword: null }
   };
 }
@@ -1069,6 +1135,7 @@ const RECIPES = [
   { id: 'piston', name: 'Piston (3 stone + 2 wood)', cost: { stone: 3, wood: 2 }, give: { piston: 1 } },
   { id: 'hopper', name: 'Hopper (5 stone)', cost: { stone: 5 }, give: { hopper: 1 } },
   { id: 'crafting_table', name: 'Crafting Table (4 planks)', cost: { planks: 4 }, give: { crafting_table: 1 }, needsTable: false },
+  { id: 'torch', name: 'Torch x4 (1 coal + 1 wood)', cost: { coal: 1, wood: 1 }, give: { torch: 4 }, needsTable: false },
   { id: 'pickaxe_iron', name: 'Iron Pickaxe (3 iron ingots)', cost: { iron_ingot: 3 }, tool: { pickaxe: 'iron' }, requireTool: { pickaxe: 'stone' } },
   { id: 'axe_iron', name: 'Iron Axe (3 iron ingots)', cost: { iron_ingot: 3 }, tool: { axe: 'iron' }, requireTool: { axe: 'stone' } },
   { id: 'sword_iron', name: 'Iron Sword (2 iron ingots)', cost: { iron_ingot: 2 }, tool: { sword: 'iron' }, requireTool: { sword: 'stone' } },
@@ -1163,7 +1230,8 @@ const ITEM_DISPLAY = {
   crafting_table: { name: 'Crafting Table' },
   coal: { name: 'Coal', color: 0x2b2b2b }, raw_iron: { name: 'Raw Iron', color: 0xb08968 },
   raw_gold: { name: 'Raw Gold', color: 0xe6c235 }, iron_ingot: { name: 'Iron Ingot', color: 0xd8d8d8 },
-  gold_ingot: { name: 'Gold Ingot', color: 0xffd700 }, diamond: { name: 'Diamond', color: 0x5eead4 }
+  gold_ingot: { name: 'Gold Ingot', color: 0xffd700 }, diamond: { name: 'Diamond', color: 0x5eead4 },
+  torch: { name: 'Torch' }
 };
 let invScreenOpen = false;
 const invScreenEl = document.getElementById('inv-screen');
@@ -1321,6 +1389,9 @@ document.addEventListener('keydown', (e) => {
       break;
     case 'Digit9':
       if (inventory.lava > 0) { heldSpecial = 'lava'; renderHotbar(); showToast('Holding lava bucket'); }
+      break;
+    case 'Digit0':
+      if (inventory.torch > 0) { heldSpecial = 'torch'; renderHotbar(); showToast('Holding torch'); }
       break;
     case 'KeyE': toggleCraftMenu(); break;
     case 'KeyX': toggleInventoryScreen(); break;
@@ -2189,6 +2260,7 @@ function animate() {
   updateMining();
   updateHandView();
   updateWaterFlow(dt);
+  updateTorchLights();
   composer.render();
   renderer.clearDepth();
   if (handScene.visible) renderer.render(handScene, handCamera);

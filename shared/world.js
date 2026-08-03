@@ -123,12 +123,16 @@
     return ore || 'stone';
   }
 
-  // Carve underground tunnels/pockets with 3D noise. Kept away from bedrock
-  // and the near-surface layer so it doesn't turn every hill into swiss cheese.
+  // Carve underground tunnels/pockets with 3D noise. Kept away from bedrock so
+  // it doesn't turn every hill into swiss cheese. Most tunnels stay sealed at
+  // least 3 blocks below the surface, but where the same noise field is
+  // already carving strongly, let a rarer, higher threshold reach all the way
+  // up - that's what gives a handful of tunnels a visible open-air mouth
+  // instead of every cave being a fully enclosed pocket.
   function isCave(x, y, z, height) {
     if (y <= BEDROCK_Y + 1) return false;
-    if (y >= height - 3) return false;
     const n = valueNoise3(x * 0.11, y * 0.16, z * 0.11);
+    if (y >= height - 3) return n > 0.86;
     return n > 0.74;
   }
 
