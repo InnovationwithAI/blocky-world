@@ -262,7 +262,7 @@ const MATERIAL_COLORS = {
   enchant_table: 0x2d6b5e, brewing_stand: 0x6b4a8a, piston: 0x7a8a5a, hopper: 0x4a4a4a,
   nether_brick: 0x3a1414,
   coal_ore: 0x36393d, iron_ore: 0xb08968, gold_ore: 0xe6c235, diamond_ore: 0x5eead4,
-  crafting_table: 0x8a5a2b, torch: 0xffcc66
+  crafting_table: 0x8a5a2b, torch: 0xffcc66, tnt: 0xcc2222
 };
 const UNBREAKABLE = new Set(['bedrock', 'lava', 'water']);
 const boxGeo = new THREE.BoxGeometry(1, 1, 1);
@@ -1059,15 +1059,16 @@ function makeDefaultInventory() {
     enchant_table: 0, brewing_stand: 0, piston: 0, hopper: 0,
     potion_speed: 0, potion_strength: 0, fish: 0, carrot: 0, potato: 0, carrot_seeds: 0, potato_seeds: 0,
     crafting_table: 0, coal: 0, raw_iron: 0, raw_gold: 0, iron_ingot: 0, gold_ingot: 0, diamond: 0,
-    torch: 0,
-    tools: { pickaxe: null, axe: null, sword: null }
+    torch: 0, boat: 0, tnt: 0,
+    tools: { pickaxe: null, axe: null, sword: null, armor: null }
   };
 }
 const inventory = makeDefaultInventory();
 let selectedMaterial = 'dirt';
 let heldSpecial = null; // 'bed' | 'lever' | 'plate' | 'door' | 'rail' | 'portal' | 'bow' | 'wheat_seeds' | null
 const hotbarEl = document.getElementById('hotbar');
-const TOOL_TIER_RANK = { wood: 1, stone: 2, iron: 3, diamond: 4 };
+const TOOL_TIER_RANK = { wood: 1, stone: 2, iron: 3, diamond: 4, wool: 1, gold: 2 };
+const ARMOR_REDUCTION = { wool: 0.1, gold: 0.2, iron: 0.35, diamond: 0.5 };
 const MINING_REQUIREMENT = { stone: 'wood', coal_ore: 'wood', iron_ore: 'stone', gold_ore: 'iron', diamond_ore: 'iron' };
 const BLOCK_HARDNESS = {
   grass: 0.5, dirt: 0.5, sand: 0.4, gravel: 0.4, snow: 0.3, leaves: 0.2,
@@ -1141,7 +1142,13 @@ const RECIPES = [
   { id: 'sword_iron', name: 'Iron Sword (2 iron ingots)', cost: { iron_ingot: 2 }, tool: { sword: 'iron' }, requireTool: { sword: 'stone' } },
   { id: 'pickaxe_diamond', name: 'Diamond Pickaxe (3 diamonds)', cost: { diamond: 3 }, tool: { pickaxe: 'diamond' }, requireTool: { pickaxe: 'iron' } },
   { id: 'axe_diamond', name: 'Diamond Axe (3 diamonds)', cost: { diamond: 3 }, tool: { axe: 'diamond' }, requireTool: { axe: 'iron' } },
-  { id: 'sword_diamond', name: 'Diamond Sword (2 diamonds)', cost: { diamond: 2 }, tool: { sword: 'diamond' }, requireTool: { sword: 'iron' } }
+  { id: 'sword_diamond', name: 'Diamond Sword (2 diamonds)', cost: { diamond: 2 }, tool: { sword: 'diamond' }, requireTool: { sword: 'iron' } },
+  { id: 'armor_wool', name: 'Wool Armor (5 wool)', cost: { wool: 5 }, tool: { armor: 'wool' } },
+  { id: 'armor_gold', name: 'Gold Armor (5 gold ingots)', cost: { gold_ingot: 5 }, tool: { armor: 'gold' }, requireTool: { armor: 'wool' } },
+  { id: 'armor_iron', name: 'Iron Armor (5 iron ingots)', cost: { iron_ingot: 5 }, tool: { armor: 'iron' }, requireTool: { armor: 'gold' } },
+  { id: 'armor_diamond', name: 'Diamond Armor (5 diamonds)', cost: { diamond: 5 }, tool: { armor: 'diamond' }, requireTool: { armor: 'iron' } },
+  { id: 'boat', name: 'Boat (5 wood)', cost: { wood: 5 }, give: { boat: 1 } },
+  { id: 'tnt', name: 'TNT (4 sand + 1 coal)', cost: { sand: 4, coal: 1 }, give: { tnt: 1 } }
 ];
 let craftMenuOpen = false;
 let craftSelectedIndex = 0;
@@ -1168,7 +1175,7 @@ function canAfford(recipe) {
 
 const HELD_SPECIAL_ITEMS = new Set(['bed', 'lever', 'plate', 'door', 'rail', 'portal', 'bow',
   'furnace', 'glass', 'wool', 'stairs', 'slab', 'enchant_table', 'brewing_stand', 'piston', 'hopper',
-  'crafting_table']);
+  'crafting_table', 'tnt']);
 function craftRecipe(recipe) {
   if (recipe.needsTable !== false && !findNearbyBlockOfType('crafting_table', 4)) {
     showToast('Need a crafting table nearby');
@@ -1183,6 +1190,7 @@ function craftRecipe(recipe) {
     }
   }
   if (recipe.tool) for (const t in recipe.tool) inventory.tools[t] = recipe.tool[t];
+  if (recipe.tool && recipe.tool.armor) socket.emit('setArmor', { armor: inventory.tools.armor });
   renderHotbar();
   renderCraftMenu();
   showToast('Crafted ' + recipe.name.split(' (')[0]);
@@ -1231,7 +1239,7 @@ const ITEM_DISPLAY = {
   coal: { name: 'Coal', color: 0x2b2b2b }, raw_iron: { name: 'Raw Iron', color: 0xb08968 },
   raw_gold: { name: 'Raw Gold', color: 0xe6c235 }, iron_ingot: { name: 'Iron Ingot', color: 0xd8d8d8 },
   gold_ingot: { name: 'Gold Ingot', color: 0xffd700 }, diamond: { name: 'Diamond', color: 0x5eead4 },
-  torch: { name: 'Torch' }
+  torch: { name: 'Torch' }, boat: { name: 'Boat', color: 0x8a5a2b }, tnt: { name: 'TNT' }
 };
 let invScreenOpen = false;
 const invScreenEl = document.getElementById('inv-screen');
@@ -1269,7 +1277,8 @@ function renderInventoryScreen() {
     invGridEl.appendChild(cell);
   }
   const t = inventory.tools;
-  invToolsEl.innerHTML = `<span>Pickaxe: ${t.pickaxe || 'none'}</span><span>Axe: ${t.axe || 'none'}</span><span>Sword: ${t.sword || 'none'}</span>`;
+  const armorLabel = t.armor ? `${t.armor} (${Math.round(ARMOR_REDUCTION[t.armor] * 100)}% defense)` : 'none';
+  invToolsEl.innerHTML = `<span>Pickaxe: ${t.pickaxe || 'none'}</span><span>Axe: ${t.axe || 'none'}</span><span>Sword: ${t.sword || 'none'}</span><span>Armor: ${armorLabel}</span>`;
 }
 invSearchEl.addEventListener('input', renderInventoryScreen);
 
@@ -1591,6 +1600,7 @@ function placeBlock() {
     spreadFluid(nx, ny, nz, placeMaterial);
     unlockAchievement('first_fluid', 'Plumber');
   }
+  if (placeMaterial === 'tnt') showToast('TNT armed! Get clear...');
   unlockAchievement('first_place', 'Builder');
 }
 
@@ -1926,16 +1936,25 @@ function startNewGame() {
   document.getElementById('apple-count').textContent = `Apples: ${inventory.apple} | Meat: ${inventory.meat} (F to eat)`;
   renderHotbar();
   socket.emit('startNewGame');
+  socket.emit('setArmor', { armor: null });
   showToast('Starting a new game...');
 }
 
 let riding = false;
+let boating = false;
 function toggleRide() {
+  if (riding) { riding = false; showToast('Dismounted'); return; }
+  if (boating) { boating = false; showToast('Boat docked'); return; }
   const feetKey = bkey(Math.round(camera.position.x), Math.round(camera.position.y - EYE_HEIGHT - 0.5), Math.round(camera.position.z));
   const onRail = blockAt.get(feetKey);
-  if (!riding && (!onRail || onRail.material !== 'rail')) { showToast('Not standing on a rail'); return; }
-  riding = !riding;
-  showToast(riding ? 'Riding minecart' : 'Dismounted');
+  if (onRail && onRail.material === 'rail') { riding = true; showToast('Riding minecart'); return; }
+  const waterEntry = blockAt.get(bkey(Math.round(camera.position.x), Math.round(camera.position.y - EYE_HEIGHT), Math.round(camera.position.z)));
+  if ((inWater || (waterEntry && waterEntry.material === 'water')) && (inventory.boat || 0) > 0) {
+    boating = true;
+    showToast('Boating');
+    return;
+  }
+  showToast('Not on a rail, or not in water with a boat');
 }
 
 function checkPortalProximity() {
@@ -2088,6 +2107,26 @@ function animate() {
     const nextRail = blockAt.get(bkey(Math.round(nx), Math.round(camera.position.y - EYE_HEIGHT - 0.5), Math.round(nz)));
     if (nextRail && nextRail.material === 'rail') { camera.position.x = nx; camera.position.z = nz; }
     else { riding = false; showToast('End of track'); }
+  } else if (gameStarted && !menusOpen && boating) {
+    const waterEntry = blockAt.get(bkey(Math.round(camera.position.x), Math.round(camera.position.y - EYE_HEIGHT), Math.round(camera.position.z)));
+    if (!waterEntry || waterEntry.material !== 'water') {
+      boating = false;
+      showToast('Boat docked');
+    } else {
+      const dir = new THREE.Vector3();
+      camera.getWorldDirection(dir);
+      dir.y = 0; dir.normalize();
+      const right = new THREE.Vector3().crossVectors(dir, camera.up).normalize();
+      const step = new THREE.Vector3();
+      if (move.forward) step.add(dir);
+      if (move.back) step.sub(dir);
+      if (move.right) step.add(right);
+      if (move.left) step.sub(right);
+      const boatSpeed = 5.5;
+      if (step.lengthSq() > 0) step.normalize().multiplyScalar(boatSpeed * dt);
+      camera.position.x += step.x;
+      camera.position.z += step.z;
+    }
   } else if (gameStarted && !menusOpen && creativeMode) {
     const dir = new THREE.Vector3();
     camera.getWorldDirection(dir);

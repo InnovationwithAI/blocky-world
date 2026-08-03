@@ -34,6 +34,16 @@ const HOSTILE_KINDS = new Set(['zombie', 'skeleton', 'boss', 'spider', 'enderman
 const CREEPER_FUSE_MS = 1200;
 const CREEPER_FUSE_RANGE_SQ = 9; // ~3 blocks, horizontal
 const EXPLOSION_RADIUS = 2;
+const TNT_FUSE_MS = 2500;
+const TNT_RADIUS = 3;
+const ARMOR_REDUCTION = { wool: 0.1, gold: 0.2, iron: 0.35, diamond: 0.5 };
+
+// Every hit that lands on a player - melee, explosion, fall, lava - routes
+// through here so equipped armor reduces it consistently everywhere.
+function applyDamage(p, amount) {
+  const reduction = ARMOR_REDUCTION[p.armor] || 0;
+  p.health = Math.max(0, p.health - amount * (1 - reduction));
+}
 const CROP_GROWTH_MS = 45 * 1000;
 
 function randomSpawn() {
@@ -95,7 +105,7 @@ io.on('connection', (socket) => {
   players[socket.id] = {
     x: spawn.x, y: spawn.y, z: spawn.z, ry: 0,
     color: COLORS[colorIdx++ % COLORS.length],
-    health: 20, hunger: 20, dim: 'overworld', bedSpawn: null
+    health: 20, hunger: 20, dim: 'overworld', bedSpawn: null, armor: null
   };
 
   socket.emit('init', {
@@ -155,6 +165,9 @@ io.on('connection', (socket) => {
     const cropKey = x + ',' + y + ',' + z;
     if (action === 'remove') delete crops[cropKey];
     if (action === 'add' && material === 'wheat_young') crops[cropKey] = Date.now();
+    if (action === 'add' && material === 'tnt') {
+      setTimeout(() => triggerExplosion(x, y, z, playerDim, TNT_RADIUS), TNT_FUSE_MS);
+    }
 
     for (const [id, sock] of io.sockets.sockets) {
       if (id === socket.id) continue;
@@ -192,6 +205,12 @@ io.on('connection', (socket) => {
     p.bedSpawn = { x, y, z };
   });
 
+  socket.on('setArmor', ({ armor }) => {
+    const p = players[socket.id];
+    if (!p) return;
+    p.armor = armor;
+  });
+
   socket.on('sleep', () => {
     // simplification: any one player sleeping skips the shared night for everyone
     if (isNight()) {
@@ -209,7 +228,7 @@ io.on('connection', (socket) => {
   socket.on('takeDamage', ({ amount }) => {
     const p = players[socket.id];
     if (!p) return;
-    p.health = Math.max(0, p.health - (amount || 1));
+    applyDamage(p, amount || 1);
   });
 
   socket.on('setHardcore', ({ hardcore }) => {
@@ -228,6 +247,7 @@ io.on('connection', (socket) => {
     p.bedSpawn = null;
     p.hardcore = false;
     p.gameOver = false;
+    p.armor = null;
     const spawn = randomSpawn();
     p.x = spawn.x; p.y = spawn.y; p.z = spawn.z;
     p.health = 20; p.hunger = 20;
@@ -341,7 +361,7 @@ setInterval(() => {
           const range = ent.kind === 'skeleton' ? 49 : 2.25;
           const cooldown = ent.kind === 'skeleton' ? 2200 : 1800;
           if (nd2 < range && (!ent.lastHit || Date.now() - ent.lastHit > cooldown)) {
-            nearest.health = Math.max(0, nearest.health - dmg);
+            applyDamage(nearest, dmg);
             ent.lastHit = Date.now();
           }
         }
@@ -415,24 +435,22 @@ function chunkEditKeyFor(x, z) {
 
 // Damages nearby players (falloff with distance) and blows a small crater out
 // of the terrain, same as a real chunk edit so it persists and syncs like any
-// other block removal.
-function explodeCreeper(ent) {
-  const cx = Math.round(ent.x), cy = Math.round(ent.y - 1.5), cz = Math.round(ent.z);
+// other block removal. Shared by creeper deaths and detonating TNT.
+function triggerExplosion(cx, cy, cz, dim, radius) {
   for (const p of Object.values(players)) {
-    if (p.dim !== ent.dim) continue;
-    const d = Math.hypot(p.x - ent.x, p.y - ent.y, p.z - ent.z);
-    if (d < EXPLOSION_RADIUS + 1.5) {
-      const dmg = Math.round(10 * (1 - d / (EXPLOSION_RADIUS + 1.5)));
-      if (dmg > 0) p.health = Math.max(0, p.health - dmg);
+    if (p.dim !== dim) continue;
+    const d = Math.hypot(p.x - cx, p.y - cy, p.z - cz);
+    if (d < radius + 1.5) {
+      const dmg = Math.round(10 * (1 - d / (radius + 1.5)));
+      if (dmg > 0) applyDamage(p, dmg);
     }
   }
 
   const removed = [];
-  const r = EXPLOSION_RADIUS;
-  for (let dx = -r; dx <= r; dx++) {
-    for (let dy = -r; dy <= r; dy++) {
-      for (let dz = -r; dz <= r; dz++) {
-        if (dx * dx + dy * dy + dz * dz > r * r + 1) continue;
+  for (let dx = -radius; dx <= radius; dx++) {
+    for (let dy = -radius; dy <= radius; dy++) {
+      for (let dz = -radius; dz <= radius; dz++) {
+        if (dx * dx + dy * dy + dz * dz > radius * radius + 1) continue;
         const y = cy + dy;
         if (y <= World.BEDROCK_Y) continue;
         removed.push({ x: cx + dx, y, z: cz + dz });
@@ -440,10 +458,10 @@ function explodeCreeper(ent) {
     }
   }
   for (const { x, y, z } of removed) {
-    const key = ent.dim === 'nether' ? NETHER_KEY : chunkEditKeyFor(x, z);
+    const key = dim === 'nether' ? NETHER_KEY : chunkEditKeyFor(x, z);
     if (!chunkEdits[key]) chunkEdits[key] = {};
     let ek;
-    if (ent.dim === 'nether') {
+    if (dim === 'nether') {
       ek = x + ',' + y + ',' + z;
     } else {
       const [ecx, ecz] = World.worldToChunk(x, z);
@@ -454,10 +472,14 @@ function explodeCreeper(ent) {
 
   for (const [id, sock] of io.sockets.sockets) {
     const p = players[id];
-    if (!p || p.dim !== ent.dim) continue;
-    sock.emit('explosion', { x: ent.x, y: ent.y, z: ent.z, radius: EXPLOSION_RADIUS });
+    if (!p || p.dim !== dim) continue;
+    sock.emit('explosion', { x: cx, y: cy, z: cz, radius });
     for (const { x, y, z } of removed) sock.emit('blockEdit', { x, y, z, action: 'remove' });
   }
+}
+
+function explodeCreeper(ent) {
+  triggerExplosion(Math.round(ent.x), Math.round(ent.y - 1.5), Math.round(ent.z), ent.dim, EXPLOSION_RADIUS);
 }
 
 server.listen(PORT, () => console.log('Server running on http://localhost:' + PORT));
