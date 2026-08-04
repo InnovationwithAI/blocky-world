@@ -502,7 +502,8 @@ handGroup.add(armMesh);
 const itemMat = new THREE.MeshBasicMaterial({ map: blockTextures.dirt });
 const itemMesh = new THREE.Mesh(new THREE.BoxGeometry(0.24, 0.24, 0.24), itemMat);
 itemMesh.position.set(0, 0.2, -0.05);
-itemMesh.userData.material = 'dirt';
+itemMesh.userData.material = null;
+itemMesh.visible = false; // empty-handed until something is actually selected
 handGroup.add(itemMesh);
 handGroup.position.set(0.45, -0.42, -0.9);
 handGroup.rotation.set(0.25, -0.55, 0.15);
@@ -521,7 +522,8 @@ const HAND_SWING_MS = 220;
 
 function updateHandView() {
   const mat = currentHeldVisual();
-  if (itemMesh.userData.material !== mat && blockTextures[mat]) {
+  itemMesh.visible = !!mat;
+  if (mat && itemMesh.userData.material !== mat && blockTextures[mat]) {
     itemMat.map = blockTextures[mat];
     itemMat.needsUpdate = true;
     itemMesh.userData.material = mat;
@@ -1049,7 +1051,20 @@ function blockOverlapsPlayer(bx, by, bz) {
 }
 
 // ---------- Inventory & hotbar ----------
-const HOTBAR_ORDER = ['dirt', 'stone', 'grass', 'wood', 'leaves', 'planks'];
+// Slots start empty (no material assigned) - a slot only ever gets claimed
+// once, the first time the player actually finds/gains that block, so the
+// hotbar reflects what they have discovered rather than a starter kit.
+const HOTBAR_ORDER = [null, null, null, null, null, null];
+const hotbarEverAssigned = new Set();
+function claimHotbarSlotIfNeeded(key) {
+  if (!MATERIAL_COLORS[key]) return; // only real placeable blocks get a slot
+  if (hotbarEverAssigned.has(key)) return;
+  if (HOTBAR_ORDER.includes(key)) { hotbarEverAssigned.add(key); return; }
+  const emptyIdx = HOTBAR_ORDER.indexOf(null);
+  if (emptyIdx === -1) return; // hotbar full - player can still swap manually
+  HOTBAR_ORDER[emptyIdx] = key;
+  hotbarEverAssigned.add(key);
+}
 function makeDefaultInventory() {
   return {
     grass: 0, dirt: 0, stone: 0, wood: 0, leaves: 0, planks: 0, apple: 0, meat: 0,
@@ -1064,7 +1079,7 @@ function makeDefaultInventory() {
   };
 }
 const inventory = makeDefaultInventory();
-let selectedMaterial = 'dirt';
+let selectedMaterial = null;
 let selectedHotbarIndex = 0;
 let heldSpecial = null; // 'bed' | 'lever' | 'plate' | 'door' | 'rail' | 'portal' | 'bow' | 'wheat_seeds' | null
 const hotbarEl = document.getElementById('hotbar');
@@ -1093,9 +1108,19 @@ function miningDurationFor(material) {
 const ORE_DROPS = { coal_ore: 'coal', iron_ore: 'raw_iron', gold_ore: 'raw_gold', diamond_ore: 'diamond' };
 
 function renderHotbar() {
+  for (const key in inventory) {
+    if (key === 'tools') continue;
+    if ((inventory[key] || 0) > 0) claimHotbarSlotIfNeeded(key);
+  }
   hotbarEl.innerHTML = '';
   HOTBAR_ORDER.forEach((material, i) => {
     const slot = document.createElement('div');
+    if (!material) {
+      slot.className = 'slot empty';
+      slot.innerHTML = `<span class="key">${i + 1}</span>`;
+      hotbarEl.appendChild(slot);
+      return;
+    }
     slot.className = 'slot' + (!heldSpecial && material === selectedMaterial ? ' active' : '');
     slot.innerHTML = `<span class="key">${i + 1}</span><span class="count">${inventory[material]}</span>
       <span class="swatch" style="background:#${MATERIAL_COLORS[material].toString(16).padStart(6, '0')}"></span>`;
@@ -1267,8 +1292,9 @@ function renderInventoryScreen() {
   const query = invSearchEl.value.trim().toLowerCase();
   invGridEl.innerHTML = '';
   if (invSwapHintEl) {
+    const currentSlotItem = HOTBAR_ORDER[selectedHotbarIndex];
     invSwapHintEl.textContent =
-      `Click an item to put it in hotbar slot ${selectedHotbarIndex + 1} (currently ${itemNameFor(HOTBAR_ORDER[selectedHotbarIndex])}) - press 1-6 to pick a different slot`;
+      `Click an item to put it in hotbar slot ${selectedHotbarIndex + 1} (currently ${currentSlotItem ? itemNameFor(currentSlotItem) : 'empty'}) - press 1-6 to pick a different slot`;
   }
   for (const key in ITEM_DISPLAY) {
     const count = inventory[key] || 0;
@@ -1288,6 +1314,7 @@ function renderInventoryScreen() {
         // own way to be held and would crash placeBlock if forced in here.
         if (!MATERIAL_COLORS[key]) { showToast(`${itemNameFor(key)} can't go on the hotbar`); return; }
         HOTBAR_ORDER[selectedHotbarIndex] = key;
+        hotbarEverAssigned.add(key);
         selectedMaterial = key;
         heldSpecial = null;
         renderHotbar();
@@ -1589,6 +1616,7 @@ function finishBreakingBlock(x, y, z, material) {
 }
 
 function placeBlock() {
+  if (!heldSpecial && !selectedMaterial) return; // empty-handed - nothing to place
   if (heldSpecial === 'bow') { shootBow(); return; }
   if ((heldSpecial || selectedMaterial) === 'bucket') { scoopBucket(); return; }
 
@@ -1980,8 +2008,11 @@ function startNewGame() {
   Object.assign(inventory, makeDefaultInventory());
   discoveredItems.clear();
   unlockedAchievements.clear();
+  hotbarEverAssigned.clear();
+  for (let i = 0; i < HOTBAR_ORDER.length; i++) HOTBAR_ORDER[i] = null;
   heldSpecial = null;
-  selectedMaterial = 'dirt';
+  selectedMaterial = null;
+  selectedHotbarIndex = 0;
   hardcoreMode = false;
   gameOver = false;
   creativeMode = false;
