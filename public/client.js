@@ -1307,7 +1307,8 @@ function renderInventoryScreen() {
     if (discovered) {
       cell.innerHTML = `<span class="inv-count">${count}</span>
         <span class="swatch" style="background:#${swatchHex(key)}"></span>
-        <span class="inv-name">${itemNameFor(key)}${slotIdx !== -1 ? ' (slot ' + (slotIdx + 1) + ')' : ''}</span>`;
+        <span class="inv-name">${itemNameFor(key)}${slotIdx !== -1 ? ' (slot ' + (slotIdx + 1) + ')' : ''}</span>
+        ${count > 0 ? `<span class="inv-discard" title="Discard">&#10005;</span>` : ''}`;
       cell.addEventListener('click', () => {
         // Hotbar slots hold placeable blocks (they get placed straight into the
         // world) - non-block items like food/ingots/tools already have their
@@ -1321,6 +1322,13 @@ function renderInventoryScreen() {
         renderInventoryScreen();
         showToast(`Slot ${selectedHotbarIndex + 1}: ${itemNameFor(key)}`);
       });
+      const discardBtn = cell.querySelector('.inv-discard');
+      if (discardBtn) {
+        discardBtn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          discardItem(key);
+        });
+      }
     }
     invGridEl.appendChild(cell);
   }
@@ -1329,6 +1337,17 @@ function renderInventoryScreen() {
   invToolsEl.innerHTML = `<span>Pickaxe: ${t.pickaxe || 'none'}</span><span>Axe: ${t.axe || 'none'}</span><span>Sword: ${t.sword || 'none'}</span><span>Armor: ${armorLabel}</span>`;
 }
 invSearchEl.addEventListener('input', renderInventoryScreen);
+
+function discardItem(key) {
+  const count = inventory[key] || 0;
+  if (count <= 0) return;
+  inventory[key] = 0;
+  if (key === heldSpecial) heldSpecial = null;
+  if (key === selectedMaterial) selectedMaterial = null;
+  renderHotbar();
+  renderInventoryScreen();
+  showToast(`Discarded ${count} ${itemNameFor(key)}`);
+}
 
 // ---------- Pocket crafting (2x2, no table needed) ----------
 const POCKET_RECIPES = RECIPES.filter((r) => r.needsTable === false);

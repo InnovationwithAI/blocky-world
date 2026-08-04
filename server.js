@@ -32,7 +32,8 @@ let entityIdCounter = 1;
 
 const HOSTILE_KINDS = new Set(['zombie', 'skeleton', 'boss', 'spider', 'enderman', 'creeper']);
 const CREEPER_FUSE_MS = 1200;
-const CREEPER_FUSE_RANGE_SQ = 9; // ~3 blocks, horizontal
+const CREEPER_FUSE_RANGE_SQ = 9; // 3 blocks, true 3D distance
+const MELEE_RANGE_SQ = 9; // 3 blocks, true 3D distance
 const EXPLOSION_RADIUS = 2;
 const TNT_FUSE_MS = 2500;
 const TNT_RADIUS = 3;
@@ -344,8 +345,11 @@ setInterval(() => {
           }
           if (ent.dim === 'overworld') ent.y = World.heightAt(Math.round(ent.x), Math.round(ent.z)) + 1.5;
         }
-        const dx2 = nearest.x - ent.x, dz2 = nearest.z - ent.z;
-        const nd2 = dx2 * dx2 + dz2 * dz2;
+        // True 3D distance - horizontal-only would let a mob below you in a
+        // ravine or above you on a ledge still land hits just for being
+        // close on the flat plane, regardless of the actual vertical gap.
+        const dx2 = nearest.x - ent.x, dy2 = nearest.y - ent.y, dz2 = nearest.z - ent.z;
+        const nd2 = dx2 * dx2 + dy2 * dy2 + dz2 * dz2;
         if (ent.kind === 'creeper') {
           if (nd2 < CREEPER_FUSE_RANGE_SQ) {
             ent.fuseT = (ent.fuseT || 0) + TICK_MS;
@@ -358,7 +362,7 @@ setInterval(() => {
           }
         } else {
           const dmg = ent.kind === 'boss' ? 4 : 1;
-          const range = ent.kind === 'skeleton' ? 49 : 2.25;
+          const range = ent.kind === 'skeleton' ? 49 : MELEE_RANGE_SQ;
           const cooldown = ent.kind === 'skeleton' ? 2200 : 1800;
           if (nd2 < range && (!ent.lastHit || Date.now() - ent.lastHit > cooldown)) {
             applyDamage(nearest, dmg);
