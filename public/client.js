@@ -823,7 +823,8 @@ const ENTITY_LOOKS = {
   spider: { body: 0x1a1414, head: 0x2a1e1e, scale: 0.85 },
   enderman: { body: 0x111111, head: 0x8e2de2, scale: 1.6 },
   villager: { body: 0x8a6a4a, head: 0xd9b98a, scale: 1.05 },
-  creeper: { body: 0x3fa34d, head: 0x2e8b3d, scale: 1.1 }
+  creeper: { body: 0x3fa34d, head: 0x2e8b3d, scale: 1.1 },
+  sheep: { body: 0xf2f2ec, head: 0x4a4a4a, scale: 1.05 }
 };
 function makeEntityMesh(kind) {
   const look = ENTITY_LOOKS[kind] || ENTITY_LOOKS.zombie;
@@ -951,12 +952,19 @@ socket.on('explosion', ({ x, y, z }) => {
   spawnExplosionParticles(x, y, z);
   sfx.explosion();
 });
+const MOB_LOOT = {
+  cow: { item: 'meat', amount: 2 },
+  pig: { item: 'meat', amount: 2 },
+  skeleton: { item: 'bone', amount: 2 },
+  spider: { item: 'string', amount: 1 },
+  enderman: { item: 'ender_pearl', amount: 1 }
+};
 socket.on('lootDrop', ({ kind }) => {
-  if (kind === 'cow' || kind === 'pig') {
-    inventory.meat = (inventory.meat || 0) + 2;
-    renderHotbar();
-    showToast('+2 meat');
-  }
+  const loot = MOB_LOOT[kind];
+  if (!loot) return;
+  inventory[loot.item] = (inventory[loot.item] || 0) + loot.amount;
+  renderHotbar();
+  showToast(`+${loot.amount} ${itemNameFor(loot.item)}`);
 });
 socket.on('tick', (data) => {
   for (const [id, p] of Object.entries(data.players)) {
@@ -1075,6 +1083,7 @@ function makeDefaultInventory() {
     potion_speed: 0, potion_strength: 0, fish: 0, carrot: 0, potato: 0, carrot_seeds: 0, potato_seeds: 0,
     crafting_table: 0, coal: 0, raw_iron: 0, raw_gold: 0, iron_ingot: 0, gold_ingot: 0, diamond: 0,
     torch: 0, boat: 0, tnt: 0, bucket: 0,
+    shears: 0, compass: 0, bone: 0, string: 0, ender_pearl: 0,
     tools: { pickaxe: null, axe: null, sword: null, armor: null }
   };
 }
@@ -1175,7 +1184,9 @@ const RECIPES = [
   { id: 'armor_diamond', name: 'Diamond Armor (5 diamonds)', cost: { diamond: 5 }, tool: { armor: 'diamond' }, requireTool: { armor: 'iron' } },
   { id: 'boat', name: 'Boat (5 wood)', cost: { wood: 5 }, give: { boat: 1 } },
   { id: 'tnt', name: 'TNT (4 sand + 1 coal)', cost: { sand: 4, coal: 1 }, give: { tnt: 1 } },
-  { id: 'bucket', name: 'Bucket (3 iron ingots)', cost: { iron_ingot: 3 }, give: { bucket: 1 } }
+  { id: 'bucket', name: 'Bucket (3 iron ingots)', cost: { iron_ingot: 3 }, give: { bucket: 1 } },
+  { id: 'shears', name: 'Shears (2 iron ingots)', cost: { iron_ingot: 2 }, give: { shears: 1 } },
+  { id: 'compass', name: 'Compass (4 iron ingots)', cost: { iron_ingot: 4 }, give: { compass: 1 } }
 ];
 let craftMenuOpen = false;
 let craftSelectedIndex = 0;
@@ -1267,7 +1278,10 @@ const ITEM_DISPLAY = {
   raw_gold: { name: 'Raw Gold', color: 0xe6c235 }, iron_ingot: { name: 'Iron Ingot', color: 0xd8d8d8 },
   gold_ingot: { name: 'Gold Ingot', color: 0xffd700 }, diamond: { name: 'Diamond', color: 0x5eead4 },
   torch: { name: 'Torch' }, boat: { name: 'Boat', color: 0x8a5a2b }, tnt: { name: 'TNT' },
-  bucket: { name: 'Bucket', color: 0xb0b0b0 }
+  bucket: { name: 'Bucket', color: 0xb0b0b0 },
+  shears: { name: 'Shears', color: 0xaaaaaa }, compass: { name: 'Compass', color: 0xcc8833 },
+  bone: { name: 'Bone', color: 0xe8e0c8 }, string: { name: 'String', color: 0xe8e8e0 },
+  ender_pearl: { name: 'Ender Pearl', color: 0x2fae8f }
 };
 let invScreenOpen = false;
 const invScreenEl = document.getElementById('inv-screen');
@@ -1486,6 +1500,7 @@ document.addEventListener('keydown', (e) => {
     case 'KeyC': useNearbyBlock(); break;
     case 'KeyV': drinkPotion(); break;
     case 'KeyT': tradeWithVillager(); break;
+    case 'KeyY': shearNearby(); break;
     case 'KeyH': goFishing(); break;
     case 'KeyJ': if (gameStarted && !spectatorMode && !gameOver) minePressed = true; break;
     case 'KeyK': if (gameStarted && !spectatorMode && !gameOver) placeBlock(); break;
@@ -1847,12 +1862,26 @@ function activateNearestMechanism(fromPos) {
   }
 }
 
+let mySpawnPoint = { x: 0, z: 0 };
 function sleepInBed() {
   const bed = findNearbyBlockOfType('bed', 4);
   if (!bed) { showToast('No bed nearby'); return; }
   socket.emit('setBedSpawn', bed);
   socket.emit('sleep');
+  mySpawnPoint = { x: bed.x, z: bed.z };
   showToast('Zzz... spawn set to bed');
+}
+
+const compassEl = document.getElementById('compass');
+const compassNeedleEl = document.getElementById('compass-needle');
+function updateCompass() {
+  if (!(inventory.compass > 0)) { compassEl.style.display = 'none'; return; }
+  compassEl.style.display = 'block';
+  const dx = mySpawnPoint.x - camera.position.x;
+  const dz = mySpawnPoint.z - camera.position.z;
+  const targetAngle = Math.atan2(-dx, -dz);
+  const relativeAngle = targetAngle - camera.rotation.y;
+  compassNeedleEl.style.transform = `rotate(${relativeAngle}rad)`;
 }
 
 const TOOL_ENCHANT_BONUS = { sword: 3 };
@@ -1966,6 +1995,21 @@ function breedNearby() {
   socket.emit('breedEntities', { entityId: pair[0].mesh.userData.entityId });
   showToast('Bred a baby ' + kind + '!');
   unlockAchievement('first_breed', 'Animal Whisperer');
+}
+
+// Shears are a reusable tool (not consumed), same convention as the other
+// tools in this game never breaking - matches shearing being non-lethal too.
+function shearNearby() {
+  if ((inventory.shears || 0) < 1) { showToast('Need shears'); return; }
+  const sheep = Array.from(remoteEntities.values()).find((re) =>
+    re.kind === 'sheep' && re.mesh.position.distanceTo(camera.position) < 4
+  );
+  if (!sheep) { showToast('No sheep nearby'); return; }
+  const amount = 1 + Math.floor(Math.random() * 3);
+  inventory.wool = (inventory.wool || 0) + amount;
+  renderHotbar();
+  showToast(`Sheared +${amount} wool`);
+  unlockAchievement('first_shear', 'Wool Gatherer');
 }
 
 const TRADE_REWARDS = [
@@ -2404,6 +2448,7 @@ function animate() {
   updateHandView();
   updateWaterFlow(dt);
   updateTorchLights();
+  updateCompass();
   composer.render();
   renderer.clearDepth();
   if (handScene.visible) renderer.render(handScene, handCamera);

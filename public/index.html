@@ -48,6 +48,20 @@
     position: fixed; top: 10px; right: 10px; color: white; font-size: 13px;
     background: rgba(0,0,0,0.35); padding: 6px 10px; border-radius: 6px; pointer-events: none;
   }
+  #compass {
+    position: fixed; top: 60px; right: 10px; width: 54px; height: 54px; display: none;
+    background: rgba(0,0,0,0.35); border-radius: 50%; border: 2px solid rgba(255,255,255,0.3);
+    pointer-events: none;
+  }
+  #compass-needle {
+    position: absolute; left: 50%; top: 50%; width: 3px; height: 20px;
+    background: #ff5555; transform-origin: 50% 100%; margin-left: -1.5px; margin-top: -20px;
+    clip-path: polygon(50% 0%, 100% 100%, 0% 100%);
+  }
+  #compass-label {
+    position: absolute; bottom: -16px; left: 0; right: 0; text-align: center;
+    color: white; font-size: 9px; opacity: 0.8;
+  }
   #dead-banner {
     position: fixed; inset: 0; display: none; align-items: center; justify-content: center;
     color: #ff5555; font-size: 42px; font-weight: bold; background: rgba(0,0,0,0.4); z-index: 15; pointer-events: none;
@@ -134,7 +148,7 @@
 </head>
 <body>
 <div id="crosshair"></div>
-<div id="hint">WASD move &middot; Look: mouse/arrows &middot; Space jump &middot; J break/attack &middot; K place/plant/shoot &middot; 1-6 hotbar &middot; 0 hold torch &middot; E crafting &middot; X inventory &middot; F eat &middot; B breed &middot; N sleep &middot; R ride cart/boat &middot; G creative &middot; M new game</div>
+<div id="hint">WASD move &middot; Look: mouse/arrows &middot; Space jump &middot; J break/attack &middot; K place/plant/shoot &middot; 1-6 hotbar &middot; 0 hold torch &middot; E crafting &middot; X inventory &middot; F eat &middot; B breed &middot; Y shear sheep &middot; N sleep &middot; R ride cart/boat &middot; G creative &middot; M new game</div>
 <div id="toast-container"></div>
 <div id="craft-menu">
   <h2>Crafting</h2>
@@ -168,6 +182,7 @@
   <div id="apple-count">Apples: 0 | Meat: 0 (F to eat)</div>
 </div>
 <div id="players-online">Players online: 1</div>
+<div id="compass"><div id="compass-needle"></div><div id="compass-label">spawn</div></div>
 <div id="dead-banner">You died — respawning...</div>
 <div id="gameover-banner">GAME OVER<span>Hardcore mode: this world ends here for you.</span></div>
 <div id="hotbar"></div>

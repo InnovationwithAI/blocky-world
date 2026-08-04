@@ -1,5 +1,7 @@
 const express = require('express');
 const http = require('http');
+const fs = require('fs');
+const path = require('path');
 const { Server } = require('socket.io');
 const World = require('./shared/world.js');
 
@@ -17,6 +19,43 @@ const entities = {};   // id -> {kind,x,y,z,health,dim,lastHit,baby}
 const chunkEdits = {}; // "cx,cz" -> { "lx,y,lz": {action,material} } (nether arena stored under key 'nether,nether')
 const crops = {};      // "x,y,z" -> plantedAt ms (overworld only)
 
+// ---------- World persistence ----------
+// Players/entities are session state (no login system, socket ids change
+// every reconnect) so only the world itself - what has been built/planted -
+// is worth saving. This protects against the free-tier idle spin-down/wake
+// cycle; it does NOT survive an actual redeploy, since Render's free web
+// service disk is rebuilt fresh on every deploy regardless of what is
+// written here. Surviving deploys too would need a persistent disk or an
+// external database on the Render account - a billing decision, not
+// something to wire up unasked.
+const SAVE_FILE = path.join(__dirname, 'world-save.json');
+const SAVE_INTERVAL_MS = 30 * 1000;
+
+function loadWorld() {
+  try {
+    if (!fs.existsSync(SAVE_FILE)) return;
+    const data = JSON.parse(fs.readFileSync(SAVE_FILE, 'utf8'));
+    if (data.chunkEdits) Object.assign(chunkEdits, data.chunkEdits);
+    if (data.crops) Object.assign(crops, data.crops);
+    // netherBuilt is deliberately not restored - entities (including the
+    // boss) are session state and are not saved, so leaving this false lets
+    // buildNetherArena() do its normal deterministic rebuild, including a
+    // fresh boss, the first time anyone re-enters after a restart.
+    console.log('Loaded saved world from', SAVE_FILE);
+  } catch (e) {
+    console.error('Failed to load saved world, starting fresh:', e.message);
+  }
+}
+
+function saveWorld() {
+  try {
+    const data = JSON.stringify({ chunkEdits, crops });
+    fs.writeFileSync(SAVE_FILE, data);
+  } catch (e) {
+    console.error('Failed to save world:', e.message);
+  }
+}
+
 const DAY_LENGTH = 3 * 60 * 1000; // 3 minute full day/night cycle
 const startTime = Date.now();
 let sleepOffsetMs = 0;
@@ -31,6 +70,8 @@ let colorIdx = 0;
 let entityIdCounter = 1;
 
 const HOSTILE_KINDS = new Set(['zombie', 'skeleton', 'boss', 'spider', 'enderman', 'creeper']);
+const PASSIVE_KINDS = new Set(['cow', 'pig', 'sheep']);
+const LOOT_KINDS = new Set(['cow', 'pig', 'skeleton', 'spider', 'enderman']);
 const CREEPER_FUSE_MS = 1200;
 const CREEPER_FUSE_RANGE_SQ = 9; // 3 blocks, true 3D distance
 const MELEE_RANGE_SQ = 9; // 3 blocks, true 3D distance
@@ -182,7 +223,7 @@ io.on('connection', (socket) => {
     if (!ent) return;
     ent.health -= (damage || 5);
     if (ent.health <= 0) {
-      if (!HOSTILE_KINDS.has(ent.kind) && ent.kind !== 'boss') {
+      if (LOOT_KINDS.has(ent.kind)) {
         io.to(socket.id).emit('lootDrop', { kind: ent.kind });
       }
       delete entities[entityId];
@@ -288,7 +329,7 @@ setInterval(() => {
   }
 
   // passive animal spawn (overworld, daytime, light cap)
-  const animalCount = Object.values(entities).filter((e) => e.dim === 'overworld' && (e.kind === 'cow' || e.kind === 'pig')).length;
+  const animalCount = Object.values(entities).filter((e) => e.dim === 'overworld' && PASSIVE_KINDS.has(e.kind)).length;
   if (!night && overworldPlayers.length > 0 && animalCount < overworldPlayers.length * 3 && Math.random() < 0.08) {
     const [, target] = overworldPlayers[Math.floor(Math.random() * overworldPlayers.length)];
     const angle = Math.random() * Math.PI * 2;
@@ -296,7 +337,8 @@ setInterval(() => {
     const mx = target.x + Math.cos(angle) * dist;
     const mz = target.z + Math.sin(angle) * dist;
     const h = World.heightAt(Math.round(mx), Math.round(mz));
-    const kind = Math.random() < 0.5 ? 'cow' : 'pig';
+    const roll = Math.random();
+    const kind = roll < 0.34 ? 'cow' : roll < 0.67 ? 'pig' : 'sheep';
     entities['e' + (entityIdCounter++)] = { kind, x: mx, y: h + 1.5, z: mz, health: 10, dim: 'overworld', wanderT: 0 };
   }
 
@@ -370,7 +412,7 @@ setInterval(() => {
           }
         }
       }
-    } else if (ent.kind === 'cow' || ent.kind === 'pig') {
+    } else if (PASSIVE_KINDS.has(ent.kind)) {
       ent.wanderT = (ent.wanderT || 0) - TICK_MS;
       if (ent.wanderT <= 0) {
         ent.wanderAngle = Math.random() * Math.PI * 2;
@@ -485,5 +527,15 @@ function triggerExplosion(cx, cy, cz, dim, radius) {
 function explodeCreeper(ent) {
   triggerExplosion(Math.round(ent.x), Math.round(ent.y - 1.5), Math.round(ent.z), ent.dim, EXPLOSION_RADIUS);
 }
+
+loadWorld();
+setInterval(saveWorld, SAVE_INTERVAL_MS);
+function shutdownAndSave(signal) {
+  console.log(`${signal} received, saving world before exit...`);
+  saveWorld();
+  process.exit(0);
+}
+process.on('SIGTERM', () => shutdownAndSave('SIGTERM'));
+process.on('SIGINT', () => shutdownAndSave('SIGINT'));
 
 server.listen(PORT, () => console.log('Server running on http://localhost:' + PORT));
