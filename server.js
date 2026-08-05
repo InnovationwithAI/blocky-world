@@ -70,8 +70,8 @@ let colorIdx = 0;
 let entityIdCounter = 1;
 
 const HOSTILE_KINDS = new Set(['zombie', 'skeleton', 'boss', 'spider', 'enderman', 'creeper']);
-const PASSIVE_KINDS = new Set(['cow', 'pig', 'sheep']);
-const LOOT_KINDS = new Set(['cow', 'pig', 'skeleton', 'spider', 'enderman']);
+const PASSIVE_KINDS = new Set(['cow', 'pig', 'sheep', 'chicken']);
+const LOOT_KINDS = new Set(['cow', 'pig', 'skeleton', 'spider', 'enderman', 'chicken']);
 const CREEPER_FUSE_MS = 1200;
 const CREEPER_FUSE_RANGE_SQ = 9; // 3 blocks, true 3D distance
 const MELEE_RANGE_SQ = 9; // 3 blocks, true 3D distance
@@ -188,7 +188,7 @@ io.on('connection', (socket) => {
     socket.emit('overworldReturn', { x, y, z });
   });
 
-  socket.on('blockEdit', ({ x, y, z, action, material, dim }) => {
+  socket.on('blockEdit', ({ x, y, z, action, material, text, dim }) => {
     const p = players[socket.id];
     const playerDim = (p && p.dim) || 'overworld';
     const key = playerDim === 'nether' ? NETHER_KEY : (() => {
@@ -203,7 +203,8 @@ io.on('connection', (socket) => {
       const [cx, cz] = World.worldToChunk(x, z);
       ek = (x - cx * World.CHUNK_SIZE) + ',' + y + ',' + (z - cz * World.CHUNK_SIZE);
     }
-    chunkEdits[key][ek] = action === 'remove' ? { action: 'remove' } : { action: 'add', material };
+    const signText = material === 'sign' && typeof text === 'string' ? text.slice(0, 40) : undefined;
+    chunkEdits[key][ek] = action === 'remove' ? { action: 'remove' } : { action: 'add', material, text: signText };
     const cropKey = x + ',' + y + ',' + z;
     if (action === 'remove') delete crops[cropKey];
     if (action === 'add' && material === 'wheat_young') crops[cropKey] = Date.now();
@@ -214,7 +215,7 @@ io.on('connection', (socket) => {
     for (const [id, sock] of io.sockets.sockets) {
       if (id === socket.id) continue;
       const other = players[id];
-      if (other && other.dim === playerDim) sock.emit('blockEdit', { x, y, z, action, material });
+      if (other && other.dim === playerDim) sock.emit('blockEdit', { x, y, z, action, material, text: signText });
     }
   });
 
@@ -251,6 +252,14 @@ io.on('connection', (socket) => {
     const p = players[socket.id];
     if (!p) return;
     p.armor = armor;
+  });
+
+  socket.on('chat', ({ text }) => {
+    const p = players[socket.id];
+    if (!p || typeof text !== 'string') return;
+    const trimmed = text.trim().slice(0, 100);
+    if (!trimmed) return;
+    io.emit('chat', { text: trimmed, color: p.color, id: socket.id });
   });
 
   socket.on('sleep', () => {
@@ -338,8 +347,9 @@ setInterval(() => {
     const mz = target.z + Math.sin(angle) * dist;
     const h = World.heightAt(Math.round(mx), Math.round(mz));
     const roll = Math.random();
-    const kind = roll < 0.34 ? 'cow' : roll < 0.67 ? 'pig' : 'sheep';
-    entities['e' + (entityIdCounter++)] = { kind, x: mx, y: h + 1.5, z: mz, health: 10, dim: 'overworld', wanderT: 0 };
+    const kind = roll < 0.28 ? 'cow' : roll < 0.53 ? 'pig' : roll < 0.78 ? 'sheep' : 'chicken';
+    const health = kind === 'chicken' ? 6 : 10;
+    entities['e' + (entityIdCounter++)] = { kind, x: mx, y: h + 1.5, z: mz, health, dim: 'overworld', wanderT: 0 };
   }
 
   // villager spawn (overworld, rare, small cap)

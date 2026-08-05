@@ -262,7 +262,7 @@ const MATERIAL_COLORS = {
   enchant_table: 0x2d6b5e, brewing_stand: 0x6b4a8a, piston: 0x7a8a5a, hopper: 0x4a4a4a,
   nether_brick: 0x3a1414,
   coal_ore: 0x36393d, iron_ore: 0xb08968, gold_ore: 0xe6c235, diamond_ore: 0x5eead4,
-  crafting_table: 0x8a5a2b, torch: 0xffcc66, tnt: 0xcc2222
+  crafting_table: 0x8a5a2b, torch: 0xffcc66, tnt: 0xcc2222, sign: 0xc9a876
 };
 const UNBREAKABLE = new Set(['bedrock', 'lava', 'water']);
 const boxGeo = new THREE.BoxGeometry(1, 1, 1);
@@ -567,6 +567,7 @@ function growCapacity(material) {
 }
 
 const blockAt = new Map();       // "x,y,z" -> { material, index, chunkKey }
+const signTexts = new Map();     // "x,y,z" -> text, for placed signs
 const chunkBlockKeys = new Map(); // "cx,cz" -> Set of "x,y,z"
 const columnBlocks = new Map();   // "x,z" -> Set of y
 const portalBlocks = new Set();   // "x,y,z" keys of placed portal blocks
@@ -639,6 +640,7 @@ function removeBlockInstance(x, y, z) {
   portalBlocks.delete(k);
   plateBlocks.delete(k);
   torchPositions.delete(k);
+  signTexts.delete(k);
   const aboveEntry = blockAt.get(bkey(x, y + 1, z));
   if (aboveEntry && aboveEntry.material === 'sand') fallingBlocks.add(bkey(x, y + 1, z));
   return entry.material;
@@ -729,7 +731,10 @@ function loadChunk(cx, cz, columns, edits) {
     const wz = cz * CHUNK_SIZE + lz;
     const edit = edits[localKey];
     if (edit.action === 'remove') removeBlockInstance(wx, y, wz);
-    else addBlockInstance(wx, y, wz, edit.material, chunkKey);
+    else {
+      addBlockInstance(wx, y, wz, edit.material, chunkKey);
+      if (edit.material === 'sign' && edit.text != null) signTexts.set(bkey(wx, y, wz), edit.text);
+    }
   }
 }
 
@@ -824,7 +829,8 @@ const ENTITY_LOOKS = {
   enderman: { body: 0x111111, head: 0x8e2de2, scale: 1.6 },
   villager: { body: 0x8a6a4a, head: 0xd9b98a, scale: 1.05 },
   creeper: { body: 0x3fa34d, head: 0x2e8b3d, scale: 1.1 },
-  sheep: { body: 0xf2f2ec, head: 0x4a4a4a, scale: 1.05 }
+  sheep: { body: 0xf2f2ec, head: 0x4a4a4a, scale: 1.05 },
+  chicken: { body: 0xf5f0e0, head: 0xd94040, scale: 0.65 }
 };
 function makeEntityMesh(kind) {
   const look = ENTITY_LOOKS[kind] || ENTITY_LOOKS.zombie;
@@ -882,6 +888,38 @@ function showToast(text) {
   setTimeout(() => { el.classList.remove('show'); setTimeout(() => el.remove(), 350); }, 2200);
 }
 
+// ---------- Chat ----------
+let chatOpen = false;
+const chatLogEl = document.getElementById('chat-log');
+const chatInputEl = document.getElementById('chat-input');
+const CHAT_MAX_LINES = 8;
+
+function openChat() {
+  chatOpen = true;
+  chatInputEl.style.display = 'block';
+  chatInputEl.value = '';
+  chatInputEl.focus();
+  try { controls.unlock(); } catch (e) { /* no mouse available */ }
+}
+function closeChat(send) {
+  if (send && chatInputEl.value.trim()) socket.emit('chat', { text: chatInputEl.value });
+  chatOpen = false;
+  chatInputEl.style.display = 'none';
+  chatInputEl.blur();
+  if (gameStarted && !craftMenuOpen && !invScreenOpen) {
+    try { controls.lock(); } catch (e) { /* no mouse available */ }
+  }
+}
+function addChatMessage(text, color, isSelf) {
+  const line = document.createElement('div');
+  line.className = 'chat-line';
+  const hex = '#' + (color != null ? color : 0xffffff).toString(16).padStart(6, '0');
+  const who = isSelf ? 'You' : 'Player';
+  line.innerHTML = `<span class="chat-name" style="color:${hex}">${who}:</span> ${text.replace(/</g, '&lt;').replace(/>/g, '&gt;')}`;
+  chatLogEl.appendChild(line);
+  while (chatLogEl.children.length > CHAT_MAX_LINES) chatLogEl.removeChild(chatLogEl.firstChild);
+}
+
 socket.on('init', (data) => {
   selfId = data.selfId;
   dayLength = data.dayLength;
@@ -900,7 +938,7 @@ socket.on('playerLeft', ({ id }) => {
   playersOnlineEl.textContent = 'Players online: ' + (remotePlayers.size + 1);
 });
 socket.on('chunkData', ({ cx, cz, columns, edits }) => loadChunk(cx, cz, columns, edits));
-socket.on('blockEdit', ({ x, y, z, action, material }) => {
+socket.on('blockEdit', ({ x, y, z, action, material, text }) => {
   const chunkKey = currentDim === 'nether' ? 'nether,nether' : (() => {
     const [cx, cz] = World.worldToChunk(x, z);
     return cx + ',' + cz;
@@ -911,6 +949,7 @@ socket.on('blockEdit', ({ x, y, z, action, material }) => {
   } else {
     if (blockAt.has(bkey(x, y, z))) removeBlockInstance(x, y, z); // replace in place (e.g. crop growth)
     addBlockInstance(x, y, z, material, chunkKey);
+    if (material === 'sign' && text != null) signTexts.set(bkey(x, y, z), text);
   }
 });
 socket.on('respawn', ({ x, y, z, fromNether }) => {
@@ -931,7 +970,10 @@ socket.on('netherArena', ({ edits, spawn }) => {
   unloadAllOverworldChunks();
   for (const key in edits) {
     const [x, y, z] = key.split(',').map(Number);
-    if (edits[key].action === 'add') addBlockInstance(x, y, z, edits[key].material, 'nether,nether');
+    if (edits[key].action === 'add') {
+      addBlockInstance(x, y, z, edits[key].material, 'nether,nether');
+      if (edits[key].material === 'sign' && edits[key].text != null) signTexts.set(bkey(x, y, z), edits[key].text);
+    }
   }
   currentDim = 'nether';
   camera.position.set(spawn.x, spawn.y, spawn.z);
@@ -952,12 +994,16 @@ socket.on('explosion', ({ x, y, z }) => {
   spawnExplosionParticles(x, y, z);
   sfx.explosion();
 });
+socket.on('chat', ({ text, color, id }) => {
+  addChatMessage(text, color, id === selfId);
+});
 const MOB_LOOT = {
   cow: { item: 'meat', amount: 2 },
   pig: { item: 'meat', amount: 2 },
   skeleton: { item: 'bone', amount: 2 },
   spider: { item: 'string', amount: 1 },
-  enderman: { item: 'ender_pearl', amount: 1 }
+  enderman: { item: 'ender_pearl', amount: 1 },
+  chicken: { item: 'feather', amount: 1 }
 };
 socket.on('lootDrop', ({ kind }) => {
   const loot = MOB_LOOT[kind];
@@ -1083,7 +1129,7 @@ function makeDefaultInventory() {
     potion_speed: 0, potion_strength: 0, fish: 0, carrot: 0, potato: 0, carrot_seeds: 0, potato_seeds: 0,
     crafting_table: 0, coal: 0, raw_iron: 0, raw_gold: 0, iron_ingot: 0, gold_ingot: 0, diamond: 0,
     torch: 0, boat: 0, tnt: 0, bucket: 0,
-    shears: 0, compass: 0, bone: 0, string: 0, ender_pearl: 0,
+    shears: 0, compass: 0, bone: 0, string: 0, ender_pearl: 0, feather: 0, sign: 0,
     tools: { pickaxe: null, axe: null, sword: null, armor: null }
   };
 }
@@ -1186,7 +1232,8 @@ const RECIPES = [
   { id: 'tnt', name: 'TNT (4 sand + 1 coal)', cost: { sand: 4, coal: 1 }, give: { tnt: 1 } },
   { id: 'bucket', name: 'Bucket (3 iron ingots)', cost: { iron_ingot: 3 }, give: { bucket: 1 } },
   { id: 'shears', name: 'Shears (2 iron ingots)', cost: { iron_ingot: 2 }, give: { shears: 1 } },
-  { id: 'compass', name: 'Compass (4 iron ingots)', cost: { iron_ingot: 4 }, give: { compass: 1 } }
+  { id: 'compass', name: 'Compass (4 iron ingots)', cost: { iron_ingot: 4 }, give: { compass: 1 } },
+  { id: 'sign', name: 'Sign x2 (2 planks)', cost: { planks: 2 }, give: { sign: 2 }, needsTable: false }
 ];
 let craftMenuOpen = false;
 let craftSelectedIndex = 0;
@@ -1213,7 +1260,7 @@ function canAfford(recipe) {
 
 const HELD_SPECIAL_ITEMS = new Set(['bed', 'lever', 'plate', 'door', 'rail', 'portal', 'bow',
   'furnace', 'glass', 'wool', 'stairs', 'slab', 'enchant_table', 'brewing_stand', 'piston', 'hopper',
-  'crafting_table', 'tnt', 'bucket']);
+  'crafting_table', 'tnt', 'bucket', 'sign']);
 function craftRecipe(recipe) {
   if (recipe.needsTable !== false && !findNearbyBlockOfType('crafting_table', 4)) {
     showToast('Need a crafting table nearby');
@@ -1281,7 +1328,8 @@ const ITEM_DISPLAY = {
   bucket: { name: 'Bucket', color: 0xb0b0b0 },
   shears: { name: 'Shears', color: 0xaaaaaa }, compass: { name: 'Compass', color: 0xcc8833 },
   bone: { name: 'Bone', color: 0xe8e0c8 }, string: { name: 'String', color: 0xe8e8e0 },
-  ender_pearl: { name: 'Ender Pearl', color: 0x2fae8f }
+  ender_pearl: { name: 'Ender Pearl', color: 0x2fae8f },
+  feather: { name: 'Feather', color: 0xf0f0e8 }, sign: { name: 'Sign' }
 };
 let invScreenOpen = false;
 const invScreenEl = document.getElementById('inv-screen');
@@ -1427,6 +1475,11 @@ function eatFood() {
 document.addEventListener('keydown', (e) => {
   if (!gameStarted && STARTER_KEYS.has(e.code)) startGame();
 
+  if (chatOpen) {
+    if (e.code === 'Escape') { closeChat(false); return; }
+    if (e.code === 'Enter') { closeChat(true); return; }
+    return; // let the browser handle normal text-input typing
+  }
   if (craftMenuOpen) {
     if (e.code === 'ArrowUp') { craftSelectedIndex = (craftSelectedIndex - 1 + RECIPES.length) % RECIPES.length; renderCraftMenu(); }
     else if (e.code === 'ArrowDown') { craftSelectedIndex = (craftSelectedIndex + 1) % RECIPES.length; renderCraftMenu(); }
@@ -1496,6 +1549,7 @@ document.addEventListener('keydown', (e) => {
     case 'KeyP': toggleHardcore(); break;
     case 'KeyO': toggleSpectator(); break;
     case 'KeyM': requestNewGame(); break;
+    case 'Enter': if (gameStarted) openChat(); break;
     case 'KeyR': toggleRide(); break;
     case 'KeyC': useNearbyBlock(); break;
     case 'KeyV': drinkPotion(); break;
@@ -1543,7 +1597,7 @@ function cancelMining() {
 // Called every frame while J is held: attacks/activates are instant (cooldown-limited),
 // but breaking a block now takes time and shows a growing crack overlay, like Minecraft.
 function updateMining() {
-  if (!minePressed || !gameStarted || spectatorMode || gameOver || craftMenuOpen || invScreenOpen) {
+  if (!minePressed || !gameStarted || spectatorMode || gameOver || craftMenuOpen || invScreenOpen || chatOpen) {
     if (mining) cancelMining();
     return;
   }
@@ -1670,6 +1724,14 @@ function placeBlock() {
   const nx = Math.round(pos.x + n.x), ny = Math.round(pos.y + n.y), nz = Math.round(pos.z + n.z);
   if (blockAt.has(bkey(nx, ny, nz))) return;
   if (blockOverlapsPlayer(nx, ny, nz)) return;
+
+  let signText = null;
+  if (placeMaterial === 'sign') {
+    signText = window.prompt('Sign text (max 40 characters):', '');
+    if (signText === null) return; // cancelled - place nothing, spend nothing
+    signText = signText.trim().slice(0, 40);
+  }
+
   const chunkKey = currentDim === 'nether' ? 'nether,nether' : (() => {
     const [cx, cz] = World.worldToChunk(nx, nz);
     return cx + ',' + cz;
@@ -1677,7 +1739,8 @@ function placeBlock() {
   if (!creativeMode) inventory[invKey] -= 1;
   renderHotbar();
   addBlockInstance(nx, ny, nz, placeMaterial, chunkKey);
-  socket.emit('blockEdit', { x: nx, y: ny, z: nz, action: 'add', material: placeMaterial });
+  if (placeMaterial === 'sign') signTexts.set(bkey(nx, ny, nz), signText);
+  socket.emit('blockEdit', { x: nx, y: ny, z: nz, action: 'add', material: placeMaterial, text: signText });
   sfx.placeBlock();
   triggerHandSwing();
   if (placeMaterial === 'sand') fallingBlocks.add(bkey(nx, ny, nz));
@@ -1761,7 +1824,7 @@ function placeFluidCell(x, y, z, material) {
 }
 
 document.addEventListener('mousedown', (e) => {
-  if (!gameStarted || craftMenuOpen || invScreenOpen || spectatorMode || gameOver) return;
+  if (!gameStarted || craftMenuOpen || invScreenOpen || chatOpen || spectatorMode || gameOver) return;
   if (e.button === 0) minePressed = true;
   else if (e.button === 2) placeBlock();
 });
@@ -1886,10 +1949,12 @@ function updateCompass() {
 
 const TOOL_ENCHANT_BONUS = { sword: 3 };
 function useNearbyBlock() {
+  const sign = findNearbyBlockOfType('sign', 3);
+  if (sign) { showToast(signTexts.get(bkey(sign.x, sign.y, sign.z)) || '(blank sign)'); return; }
   if (findNearbyBlockOfType('furnace', 3)) { smeltAtFurnace(); return; }
   if (findNearbyBlockOfType('enchant_table', 3)) { enchantTool(); return; }
   if (findNearbyBlockOfType('brewing_stand', 3)) { brewPotion(); return; }
-  showToast('No furnace, enchant table, or brewing stand nearby');
+  showToast('No sign, furnace, enchant table, or brewing stand nearby');
 }
 
 function smeltAtFurnace() {
@@ -2222,7 +2287,7 @@ const clock = new THREE.Clock();
 function animate() {
   requestAnimationFrame(animate);
   const dt = Math.min(clock.getDelta(), 0.1);
-  const menusOpen = craftMenuOpen || invScreenOpen || gameOver;
+  const menusOpen = craftMenuOpen || invScreenOpen || chatOpen || gameOver;
 
   if (!menusOpen) {
     if (look.left) camera.rotation.y += TURN_SPEED * dt;
