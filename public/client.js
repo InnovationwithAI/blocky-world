@@ -1036,6 +1036,8 @@ let chatOpen = false;
 const chatLogEl = document.getElementById('chat-log');
 const chatInputEl = document.getElementById('chat-input');
 const CHAT_MAX_LINES = 8;
+const CHAT_CLEAR_MS = 20000;
+let chatClearTimer = null;
 
 function openChat() {
   chatOpen = true;
@@ -1061,6 +1063,12 @@ function addChatMessage(text, color, isSelf) {
   line.innerHTML = `<span class="chat-name" style="color:${hex}">${who}:</span> ${text.replace(/</g, '&lt;').replace(/>/g, '&gt;')}`;
   chatLogEl.appendChild(line);
   while (chatLogEl.children.length > CHAT_MAX_LINES) chatLogEl.removeChild(chatLogEl.firstChild);
+
+  // Whole log fades out together, 20s after the most recent message - not
+  // per-line, so the timer just restarts on every new message instead of
+  // stacking up separate expirations.
+  clearTimeout(chatClearTimer);
+  chatClearTimer = setTimeout(() => { chatLogEl.innerHTML = ''; }, CHAT_CLEAR_MS);
 }
 
 socket.on('init', (data) => {
