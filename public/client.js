@@ -791,30 +791,158 @@ let overworldReturnPos = null;
 let portalCooldownUntil = 0;
 
 const SKIN_TONE = 0xe0ac69;
-function makePlayerMesh(color) {
+
+// ---------- Blocky multi-part mob/player models ----------
+// Every body is still cuboids-only (stays true to the voxel look and the
+// original-assets-only approach), but built from several boxes per species
+// - legs, wings, snout, horns - the same way Minecraft's own mobs are
+// assembled, instead of the old flat body+head pair. userData.limbs lists
+// {mesh, phase} pairs the walk-cycle animator swings in sync.
+function buildHumanoid(bodyColor, headColor) {
   const group = new THREE.Group();
-  const bodyMat = new THREE.MeshLambertMaterial({ color });
-  const skinMat = new THREE.MeshLambertMaterial({ color: SKIN_TONE });
+  const bodyMat = new THREE.MeshLambertMaterial({ color: bodyColor });
+  const headMat = new THREE.MeshLambertMaterial({ color: headColor });
 
-  const head = new THREE.Mesh(new THREE.BoxGeometry(0.45, 0.45, 0.45), skinMat);
+  const head = new THREE.Mesh(new THREE.BoxGeometry(0.45, 0.45, 0.45), headMat);
   head.position.y = 1.475;
-
   const torso = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.65, 0.3), bodyMat);
   torso.position.y = 0.925;
-
   const legGeo = new THREE.BoxGeometry(0.22, 0.65, 0.25);
-  const legL = new THREE.Mesh(legGeo, bodyMat);
-  legL.position.set(-0.13, 0.325, 0);
-  const legR = new THREE.Mesh(legGeo, bodyMat);
-  legR.position.set(0.13, 0.325, 0);
-
+  const legL = new THREE.Mesh(legGeo, bodyMat); legL.position.set(-0.13, 0.325, 0);
+  const legR = new THREE.Mesh(legGeo, bodyMat); legR.position.set(0.13, 0.325, 0);
   const armGeo = new THREE.BoxGeometry(0.2, 0.65, 0.2);
-  const armL = new THREE.Mesh(armGeo, skinMat);
-  armL.position.set(-0.35, 0.925, 0);
-  const armR = new THREE.Mesh(armGeo, skinMat);
-  armR.position.set(0.35, 0.925, 0);
+  const armL = new THREE.Mesh(armGeo, headMat); armL.position.set(-0.35, 0.925, 0);
+  const armR = new THREE.Mesh(armGeo, headMat); armR.position.set(0.35, 0.925, 0);
 
   [head, torso, legL, legR, armL, armR].forEach((m) => { m.castShadow = true; group.add(m); });
+  group.userData.limbs = [
+    { mesh: legL, phase: 0 }, { mesh: legR, phase: Math.PI },
+    { mesh: armR, phase: 0 }, { mesh: armL, phase: Math.PI }
+  ];
+  return group;
+}
+
+function buildQuadruped(bodyColor, headColor, opts) {
+  opts = opts || {};
+  const group = new THREE.Group();
+  const bodyMat = new THREE.MeshLambertMaterial({ color: bodyColor });
+  const headMat = new THREE.MeshLambertMaterial({ color: headColor });
+
+  const body = new THREE.Mesh(new THREE.BoxGeometry(0.9, 0.55, 0.5), bodyMat);
+  body.position.set(0, 0.55, 0);
+  const head = new THREE.Mesh(new THREE.BoxGeometry(0.38, 0.38, 0.38), headMat);
+  head.position.set(0, 0.68, 0.53);
+  const legGeo = new THREE.BoxGeometry(0.16, 0.45, 0.16);
+  const legFL = new THREE.Mesh(legGeo, bodyMat); legFL.position.set(-0.3, 0.225, 0.32);
+  const legFR = new THREE.Mesh(legGeo, bodyMat); legFR.position.set(0.3, 0.225, 0.32);
+  const legBL = new THREE.Mesh(legGeo, bodyMat); legBL.position.set(-0.3, 0.225, -0.32);
+  const legBR = new THREE.Mesh(legGeo, bodyMat); legBR.position.set(0.3, 0.225, -0.32);
+  const parts = [body, head, legFL, legFR, legBL, legBR];
+
+  if (opts.snout) {
+    const snout = new THREE.Mesh(new THREE.BoxGeometry(0.18, 0.16, 0.14), headMat);
+    snout.position.set(0, 0.6, 0.75);
+    parts.push(snout);
+  }
+  if (opts.wool) {
+    const wool = new THREE.Mesh(new THREE.BoxGeometry(1.0, 0.65, 0.6), bodyMat);
+    wool.position.set(0, 0.62, -0.02);
+    parts.push(wool);
+  }
+  if (opts.horns) {
+    const hornMat = new THREE.MeshLambertMaterial({ color: 0xe8e0c8 });
+    const hornGeo = new THREE.BoxGeometry(0.06, 0.14, 0.06);
+    const hornL = new THREE.Mesh(hornGeo, hornMat); hornL.position.set(-0.12, 0.92, 0.5);
+    const hornR = new THREE.Mesh(hornGeo, hornMat); hornR.position.set(0.12, 0.92, 0.5);
+    parts.push(hornL, hornR);
+  }
+  parts.forEach((m) => { m.castShadow = true; group.add(m); });
+  group.userData.limbs = [
+    { mesh: legFL, phase: 0 }, { mesh: legBR, phase: 0 },
+    { mesh: legFR, phase: Math.PI }, { mesh: legBL, phase: Math.PI }
+  ];
+  return group;
+}
+
+function buildChicken(bodyColor, combColor) {
+  const group = new THREE.Group();
+  const bodyMat = new THREE.MeshLambertMaterial({ color: bodyColor });
+  const combMat = new THREE.MeshLambertMaterial({ color: combColor });
+
+  const body = new THREE.Mesh(new THREE.BoxGeometry(0.35, 0.35, 0.5), bodyMat);
+  body.position.set(0, 0.45, 0);
+  const head = new THREE.Mesh(new THREE.BoxGeometry(0.22, 0.22, 0.22), bodyMat);
+  head.position.set(0, 0.72, 0.26);
+  const beak = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.07, 0.12), combMat);
+  beak.position.set(0, 0.68, 0.42);
+  const comb = new THREE.Mesh(new THREE.BoxGeometry(0.07, 0.09, 0.07), combMat);
+  comb.position.set(0, 0.87, 0.26);
+  const wingGeo = new THREE.BoxGeometry(0.06, 0.24, 0.32);
+  const wingL = new THREE.Mesh(wingGeo, bodyMat); wingL.position.set(-0.19, 0.45, 0);
+  const wingR = new THREE.Mesh(wingGeo, bodyMat); wingR.position.set(0.19, 0.45, 0);
+  const legGeo = new THREE.BoxGeometry(0.05, 0.28, 0.05);
+  const legL = new THREE.Mesh(legGeo, combMat); legL.position.set(-0.08, 0.14, 0);
+  const legR = new THREE.Mesh(legGeo, combMat); legR.position.set(0.08, 0.14, 0);
+
+  [body, head, beak, comb, wingL, wingR, legL, legR].forEach((m) => { m.castShadow = true; group.add(m); });
+  group.userData.limbs = [{ mesh: legL, phase: 0 }, { mesh: legR, phase: Math.PI }];
+  return group;
+}
+
+function buildCreeperModel(bodyColor, headColor) {
+  const group = new THREE.Group();
+  const bodyMat = new THREE.MeshLambertMaterial({ color: bodyColor });
+  const headMat = new THREE.MeshLambertMaterial({ color: headColor });
+
+  const head = new THREE.Mesh(new THREE.BoxGeometry(0.45, 0.45, 0.45), headMat);
+  head.position.y = 1.475;
+  const torso = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.9, 0.3), bodyMat);
+  torso.position.y = 0.85;
+  const legGeo = new THREE.BoxGeometry(0.22, 0.4, 0.24);
+  const legFL = new THREE.Mesh(legGeo, bodyMat); legFL.position.set(-0.14, 0.2, 0.14);
+  const legFR = new THREE.Mesh(legGeo, bodyMat); legFR.position.set(0.14, 0.2, 0.14);
+  const legBL = new THREE.Mesh(legGeo, bodyMat); legBL.position.set(-0.14, 0.2, -0.14);
+  const legBR = new THREE.Mesh(legGeo, bodyMat); legBR.position.set(0.14, 0.2, -0.14);
+
+  [head, torso, legFL, legFR, legBL, legBR].forEach((m) => { m.castShadow = true; group.add(m); });
+  group.userData.limbs = [
+    { mesh: legFL, phase: 0 }, { mesh: legBR, phase: 0 },
+    { mesh: legFR, phase: Math.PI }, { mesh: legBL, phase: Math.PI }
+  ];
+  return group;
+}
+
+function buildSpiderModel(bodyColor, headColor) {
+  const group = new THREE.Group();
+  const bodyMat = new THREE.MeshLambertMaterial({ color: bodyColor });
+  const headMat = new THREE.MeshLambertMaterial({ color: headColor });
+
+  const abdomen = new THREE.Mesh(new THREE.BoxGeometry(0.55, 0.4, 0.6), bodyMat);
+  abdomen.position.set(0, 0.32, -0.18);
+  const head = new THREE.Mesh(new THREE.BoxGeometry(0.32, 0.3, 0.32), headMat);
+  head.position.set(0, 0.32, 0.32);
+  const parts = [abdomen, head];
+  const legGeo = new THREE.BoxGeometry(0.5, 0.06, 0.06);
+  const legZOffsets = [0.22, 0.06, -0.1, -0.26];
+  const limbs = [];
+  legZOffsets.forEach((z, i) => {
+    const legL = new THREE.Mesh(legGeo, bodyMat);
+    legL.position.set(-0.38, 0.34, z);
+    legL.rotation.y = 0.6;
+    const legR = new THREE.Mesh(legGeo, bodyMat);
+    legR.position.set(0.38, 0.34, z);
+    legR.rotation.y = -0.6;
+    parts.push(legL, legR);
+    const phase = i % 2 === 0 ? 0 : Math.PI;
+    limbs.push({ mesh: legL, phase }, { mesh: legR, phase: phase + Math.PI });
+  });
+  parts.forEach((m) => { m.castShadow = true; group.add(m); });
+  group.userData.limbs = limbs;
+  return group;
+}
+
+function makePlayerMesh(color) {
+  const group = buildHumanoid(color, SKIN_TONE);
   scene.add(group);
   return group;
 }
@@ -826,7 +954,7 @@ const ENTITY_LOOKS = {
   cow: { body: 0x5a3d2b, head: 0xffffff, scale: 1.1 },
   pig: { body: 0xe8a0a8, head: 0xf0b8c0, scale: 0.9 },
   spider: { body: 0x1a1414, head: 0x2a1e1e, scale: 0.85 },
-  enderman: { body: 0x111111, head: 0x8e2de2, scale: 1.6 },
+  enderman: { body: 0x111111, head: 0x8e2de2, scale: 1.6, scaleX: 0.85, scaleY: 2.1, scaleZ: 0.85 },
   villager: { body: 0x8a6a4a, head: 0xd9b98a, scale: 1.05 },
   creeper: { body: 0x3fa34d, head: 0x2e8b3d, scale: 1.1 },
   sheep: { body: 0xf2f2ec, head: 0x4a4a4a, scale: 1.05 },
@@ -834,16 +962,31 @@ const ENTITY_LOOKS = {
 };
 function makeEntityMesh(kind) {
   const look = ENTITY_LOOKS[kind] || ENTITY_LOOKS.zombie;
-  const group = new THREE.Group();
-  const body = new THREE.Mesh(new THREE.BoxGeometry(0.7, 1.2, 0.5), new THREE.MeshLambertMaterial({ color: look.body }));
-  body.position.y = 0.6;
-  const head = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.5, 0.5), new THREE.MeshLambertMaterial({ color: look.head }));
-  head.position.y = 1.45;
-  body.castShadow = head.castShadow = true;
-  group.add(body, head);
-  group.scale.setScalar(look.scale);
+  let group;
+  if (kind === 'chicken') group = buildChicken(look.body, look.head);
+  else if (kind === 'creeper') group = buildCreeperModel(look.body, look.head);
+  else if (kind === 'spider') group = buildSpiderModel(look.body, look.head);
+  else if (kind === 'cow') group = buildQuadruped(look.body, look.head, { horns: true });
+  else if (kind === 'pig') group = buildQuadruped(look.body, look.head, { snout: true });
+  else if (kind === 'sheep') group = buildQuadruped(look.body, look.head, { wool: true });
+  else group = buildHumanoid(look.body, look.head); // zombie, skeleton, villager, boss, enderman
+  group.scale.set(look.scaleX || look.scale, look.scaleY || look.scale, look.scaleZ || look.scale);
   scene.add(group);
   return group;
+}
+
+// Swings each limb through a sine-wave walk cycle when the entity is
+// actually moving, easing the amplitude back to 0 when it stops instead of
+// snapping legs straight - avoids mobs looking like they are marching in
+// place while standing still.
+function animateLimbs(group, moving) {
+  const limbs = group.userData.limbs;
+  if (!limbs) return;
+  group.userData.walkT = (group.userData.walkT || 0) + (moving ? 0.16 : 0);
+  group.userData.walkAmp = THREE.MathUtils.lerp(group.userData.walkAmp || 0, moving ? 0.6 : 0, 0.15);
+  for (const limb of limbs) {
+    limb.mesh.rotation.x = Math.sin(group.userData.walkT + limb.phase) * group.userData.walkAmp;
+  }
 }
 
 function addRemotePlayer(id, p) {
@@ -2446,11 +2589,19 @@ function animate() {
   updateParticles(dt);
 
   for (const [, rp] of remotePlayers) {
-    rp.mesh.position.lerp(new THREE.Vector3(rp.target.x, rp.target.y - 0.9, rp.target.z), 0.25);
+    const targetPos = new THREE.Vector3(rp.target.x, rp.target.y - 0.9, rp.target.z);
+    const moved = rp.mesh.position.distanceTo(targetPos) > 0.01;
+    rp.mesh.position.lerp(targetPos, 0.25);
     rp.mesh.rotation.y = rp.target.ry;
+    animateLimbs(rp.mesh, moved);
   }
   for (const [, re] of remoteEntities) {
-    re.mesh.position.lerp(new THREE.Vector3(re.target.x, re.target.y - 0.9, re.target.z), 0.25);
+    const targetPos = new THREE.Vector3(re.target.x, re.target.y - 0.9, re.target.z);
+    const dx = targetPos.x - re.mesh.position.x, dz = targetPos.z - re.mesh.position.z;
+    const moved = Math.hypot(dx, dz) > 0.01;
+    if (moved) re.mesh.rotation.y = Math.atan2(dx, dz);
+    re.mesh.position.lerp(targetPos, 0.25);
+    animateLimbs(re.mesh, moved);
   }
 
   if (lastDayClock > 0.9 && dayClock < 0.1 && myHealth > 0) unlockAchievement('survived_night', 'Survived the Night');
