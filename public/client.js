@@ -262,9 +262,10 @@ const MATERIAL_COLORS = {
   enchant_table: 0x2d6b5e, brewing_stand: 0x6b4a8a, piston: 0x7a8a5a, hopper: 0x4a4a4a,
   nether_brick: 0x3a1414,
   coal_ore: 0x36393d, iron_ore: 0xb08968, gold_ore: 0xe6c235, diamond_ore: 0x5eead4,
-  crafting_table: 0x8a5a2b, torch: 0xffcc66, tnt: 0xcc2222, sign: 0xc9a876
+  crafting_table: 0x8a5a2b, torch: 0xffcc66, tnt: 0xcc2222, sign: 0xc9a876,
+  cobblestone: 0x8a8a8a, mossy_cobblestone: 0x6b8a5a, chest: 0x9a6a2b, spawner: 0x1a2a3a
 };
-const UNBREAKABLE = new Set(['bedrock', 'lava', 'water']);
+const UNBREAKABLE = new Set(['bedrock', 'lava', 'water', 'spawner']);
 const boxGeo = new THREE.BoxGeometry(1, 1, 1);
 const meshes = {};       // material -> InstancedMesh
 const meshUserData = {}; // material -> { count, capacity, positions: [] }
@@ -360,7 +361,8 @@ const MATERIAL_VARIANCE = {
   lever: 0.3, plate: 0.3, door: 0.35, rail: 0.3, portal: 0.5, netherrack: 0.4, lava: 0.3, water: 0.2,
   furnace: 0.35, glass: 0.15, wool: 0.2, stairs: 0.3, slab: 0.3,
   enchant_table: 0.4, brewing_stand: 0.4, piston: 0.35, hopper: 0.3, nether_brick: 0.35,
-  coal_ore: 0.4, iron_ore: 0.35, gold_ore: 0.3, diamond_ore: 0.25, crafting_table: 0.35
+  coal_ore: 0.4, iron_ore: 0.35, gold_ore: 0.3, diamond_ore: 0.25, crafting_table: 0.35,
+  cobblestone: 0.45, mossy_cobblestone: 0.4, chest: 0.3, spawner: 0.5
 };
 const MATERIAL_GRAIN = { wood: 'vertical', planks: 'vertical', door: 'vertical', crafting_table: 'vertical' };
 const blockTextures = {};
@@ -707,12 +709,20 @@ function loadChunk(cx, cz, columns, edits) {
   loadedChunks.add(chunkKey);
   requestedChunks.delete(chunkKey);
 
+  const dungeon = World.dungeonAt(cx, cz);
   for (const localKey in columns) {
     const [lx, lz] = localKey.split(',').map(Number);
     const wx = cx * CHUNK_SIZE + lx;
     const wz = cz * CHUNK_SIZE + lz;
     const { height, tree, biome } = columns[localKey];
     for (let y = World.BEDROCK_Y; y < height; y++) {
+      if (dungeon) {
+        const dBlock = World.dungeonBlockAt(dungeon.originX, dungeon.originY, dungeon.originZ, wx, y, wz);
+        if (dBlock !== undefined) {
+          if (dBlock !== 'air') addBlockInstance(wx, y, wz, dBlock, chunkKey);
+          continue;
+        }
+      }
       if (World.isCave(wx, y, wz, height)) continue;
       addBlockInstance(wx, y, wz, World.materialAt(wx, y, wz, height, biome), chunkKey);
     }
@@ -1163,6 +1173,16 @@ socket.on('lootDrop', ({ kind }) => {
   renderHotbar();
   showToast(`+${loot.amount} ${itemNameFor(loot.item)}`);
 });
+socket.on('chestLoot', ({ items, empty }) => {
+  if (empty) { showToast('Empty chest'); return; }
+  const parts = [];
+  for (const item of items) {
+    inventory[item.key] = (inventory[item.key] || 0) + item.amount;
+    parts.push(`${item.amount} ${itemNameFor(item.key)}`);
+  }
+  renderHotbar();
+  showToast('Found: ' + parts.join(', '));
+});
 socket.on('tick', (data) => {
   for (const [id, p] of Object.entries(data.players)) {
     if (id === selfId) {
@@ -1281,6 +1301,7 @@ function makeDefaultInventory() {
     crafting_table: 0, coal: 0, raw_iron: 0, raw_gold: 0, iron_ingot: 0, gold_ingot: 0, diamond: 0,
     torch: 0, boat: 0, tnt: 0, bucket: 0,
     shears: 0, compass: 0, bone: 0, string: 0, ender_pearl: 0, feather: 0, sign: 0,
+    cobblestone: 0, mossy_cobblestone: 0,
     tools: { pickaxe: null, axe: null, sword: null, armor: null }
   };
 }
@@ -1480,7 +1501,8 @@ const ITEM_DISPLAY = {
   shears: { name: 'Shears', color: 0xaaaaaa }, compass: { name: 'Compass', color: 0xcc8833 },
   bone: { name: 'Bone', color: 0xe8e0c8 }, string: { name: 'String', color: 0xe8e8e0 },
   ender_pearl: { name: 'Ender Pearl', color: 0x2fae8f },
-  feather: { name: 'Feather', color: 0xf0f0e8 }, sign: { name: 'Sign' }
+  feather: { name: 'Feather', color: 0xf0f0e8 }, sign: { name: 'Sign' },
+  cobblestone: { name: 'Cobblestone' }, mossy_cobblestone: { name: 'Mossy Cobblestone' }
 };
 let invScreenOpen = false;
 const invScreenEl = document.getElementById('inv-screen');
@@ -2102,10 +2124,12 @@ const TOOL_ENCHANT_BONUS = { sword: 3 };
 function useNearbyBlock() {
   const sign = findNearbyBlockOfType('sign', 3);
   if (sign) { showToast(signTexts.get(bkey(sign.x, sign.y, sign.z)) || '(blank sign)'); return; }
+  const chest = findNearbyBlockOfType('chest', 3);
+  if (chest) { socket.emit('lootChest', chest); return; }
   if (findNearbyBlockOfType('furnace', 3)) { smeltAtFurnace(); return; }
   if (findNearbyBlockOfType('enchant_table', 3)) { enchantTool(); return; }
   if (findNearbyBlockOfType('brewing_stand', 3)) { brewPotion(); return; }
-  showToast('No sign, furnace, enchant table, or brewing stand nearby');
+  showToast('No sign, chest, furnace, enchant table, or brewing stand nearby');
 }
 
 function smeltAtFurnace() {

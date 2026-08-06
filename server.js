@@ -18,6 +18,7 @@ const players = {};    // socketId -> {x,y,z,ry,color,health,hunger,dim,bedSpawn
 const entities = {};   // id -> {kind,x,y,z,health,dim,lastHit,baby}
 const chunkEdits = {}; // "cx,cz" -> { "lx,y,lz": {action,material} } (nether arena stored under key 'nether,nether')
 const crops = {};      // "x,y,z" -> plantedAt ms (overworld only)
+const lootedChests = new Set(); // "x,y,z" of dungeon chests already opened
 
 // ---------- World persistence ----------
 // Players/entities are session state (no login system, socket ids change
@@ -37,6 +38,7 @@ function loadWorld() {
     const data = JSON.parse(fs.readFileSync(SAVE_FILE, 'utf8'));
     if (data.chunkEdits) Object.assign(chunkEdits, data.chunkEdits);
     if (data.crops) Object.assign(crops, data.crops);
+    if (Array.isArray(data.lootedChests)) for (const k of data.lootedChests) lootedChests.add(k);
     // netherBuilt is deliberately not restored - entities (including the
     // boss) are session state and are not saved, so leaving this false lets
     // buildNetherArena() do its normal deterministic rebuild, including a
@@ -49,7 +51,7 @@ function loadWorld() {
 
 function saveWorld() {
   try {
-    const data = JSON.stringify({ chunkEdits, crops });
+    const data = JSON.stringify({ chunkEdits, crops, lootedChests: Array.from(lootedChests) });
     fs.writeFileSync(SAVE_FILE, data);
   } catch (e) {
     console.error('Failed to save world:', e.message);
@@ -79,6 +81,27 @@ const EXPLOSION_RADIUS = 2;
 const TNT_FUSE_MS = 2500;
 const TNT_RADIUS = 3;
 const ARMOR_REDUCTION = { wool: 0.1, gold: 0.2, iron: 0.35, diamond: 0.5 };
+
+const DUNGEON_LOOT_POOL = [
+  { key: 'iron_ingot', amount: () => 1 + Math.floor(Math.random() * 3) },
+  { key: 'gold_ingot', amount: () => 1 + Math.floor(Math.random() * 2) },
+  { key: 'diamond', amount: () => 1 },
+  { key: 'coal', amount: () => 2 + Math.floor(Math.random() * 3) },
+  { key: 'torch', amount: () => 2 + Math.floor(Math.random() * 4) },
+  { key: 'cooked_meat', amount: () => 1 + Math.floor(Math.random() * 3) },
+  { key: 'bone', amount: () => 1 + Math.floor(Math.random() * 3) },
+  { key: 'string', amount: () => 1 + Math.floor(Math.random() * 3) },
+  { key: 'wheat', amount: () => 1 + Math.floor(Math.random() * 3) }
+];
+function rollDungeonLoot() {
+  const count = 2 + Math.floor(Math.random() * 3);
+  const items = [];
+  for (let i = 0; i < count; i++) {
+    const pick = DUNGEON_LOOT_POOL[Math.floor(Math.random() * DUNGEON_LOOT_POOL.length)];
+    items.push({ key: pick.key, amount: pick.amount() });
+  }
+  return items;
+}
 
 // Every hit that lands on a player - melee, explosion, fall, lava - routes
 // through here so equipped armor reduces it consistently everywhere.
@@ -262,6 +285,15 @@ io.on('connection', (socket) => {
     io.emit('chat', { text: trimmed, color: p.color, id: socket.id });
   });
 
+  // One-time loot per chest, tracked by position so it stays looted for
+  // every player (and survives the autosave/reload cycle).
+  socket.on('lootChest', ({ x, y, z }) => {
+    const key = x + ',' + y + ',' + z;
+    if (lootedChests.has(key)) { socket.emit('chestLoot', { empty: true }); return; }
+    lootedChests.add(key);
+    socket.emit('chestLoot', { items: rollDungeonLoot() });
+  });
+
   socket.on('sleep', () => {
     // simplification: any one player sleeping skips the shared night for everyone
     if (isNight()) {
@@ -333,8 +365,39 @@ setInterval(() => {
     const health = kind === 'spider' ? 12 : kind === 'creeper' ? 15 : 20;
     entities['e' + (entityIdCounter++)] = { kind, x: mx, y: h + 1.5, z: mz, health, dim: 'overworld' };
   }
+  // dungeon spawners: work regardless of time of day, only trigger near a
+  // player, and stop once enough hostiles are already milling around it -
+  // checking the 3x3 chunk neighborhood of each player is cheap since
+  // dungeonAt is just a couple of hash lookups, no real search involved.
+  for (const [, p] of overworldPlayers) {
+    const [pcx, pcz] = World.worldToChunk(Math.round(p.x), Math.round(p.z));
+    for (let dcx = -1; dcx <= 1; dcx++) {
+      for (let dcz = -1; dcz <= 1; dcz++) {
+        const dungeon = World.dungeonAt(pcx + dcx, pcz + dcz);
+        if (!dungeon) continue;
+        const spawner = World.dungeonSpawnerPos(dungeon);
+        const dist2 = (p.x - spawner.x) ** 2 + (p.y - spawner.y) ** 2 + (p.z - spawner.z) ** 2;
+        if (dist2 > 100) continue;
+        const nearbyHostiles = Object.values(entities).filter((e) =>
+          e.dim === 'overworld' && HOSTILE_KINDS.has(e.kind) &&
+          (e.x - spawner.x) ** 2 + (e.z - spawner.z) ** 2 < 100
+        ).length;
+        if (nearbyHostiles >= 3 || Math.random() >= 0.04) continue;
+        const kind = ['zombie', 'skeleton', 'spider'][Math.floor(Math.random() * 3)];
+        entities['e' + (entityIdCounter++)] = {
+          kind, x: spawner.x + (Math.random() - 0.5) * 2, y: spawner.y, z: spawner.z + (Math.random() - 0.5) * 2,
+          health: kind === 'spider' ? 12 : 20, dim: 'overworld', fromSpawner: true
+        };
+      }
+    }
+  }
+
   if (!night) {
-    for (const id in entities) if (entities[id].dim === 'overworld' && HOSTILE_KINDS.has(entities[id].kind)) delete entities[id];
+    // dungeon spawner mobs are exempt - the whole point is they threaten the
+    // dungeon regardless of time of day, unlike the ambient night spawns
+    for (const id in entities) {
+      if (entities[id].dim === 'overworld' && HOSTILE_KINDS.has(entities[id].kind) && !entities[id].fromSpawner) delete entities[id];
+    }
   }
 
   // passive animal spawn (overworld, daytime, light cap)

@@ -136,9 +136,62 @@
     return n > 0.74;
   }
 
+  // ---------- Structures ----------
+  // Deterministic, like everything else here: given a chunk coordinate, both
+  // client and server independently compute the same answer with no need to
+  // transfer structure geometry over the network - a dungeon is just another
+  // thing chunk generation carves in, the same way caves and ore veins are.
+  const DUNGEON_W = 7, DUNGEON_H = 4, DUNGEON_D = 7;
+
+  // Rare: one roll per chunk, ~1.5% chance. Origin is kept well inside the
+  // chunk (never touching the edge) so a dungeon never has to span two
+  // chunks, which would need cross-chunk bookkeeping neither side has today.
+  function dungeonAt(cx, cz) {
+    const roll = hash(cx * 91.7 + 13.1, cz * 91.7 - 27.3);
+    if (roll <= 0.985) return null;
+    const spanX = CHUNK_SIZE - DUNGEON_W - 4;
+    const spanZ = CHUNK_SIZE - DUNGEON_D - 4;
+    const localX = 2 + Math.floor(hash(cx * 5.1, cz * 5.1) * spanX);
+    const localZ = 2 + Math.floor(hash(cx * 7.7, cz * 7.7) * spanZ);
+    const originX = cx * CHUNK_SIZE + localX;
+    const originZ = cz * CHUNK_SIZE + localZ;
+    const surfaceH = heightAt(originX, originZ);
+    const depthBelowSurface = 6 + Math.floor(hash(cx * 11.3, cz * 11.3) * 10);
+    const originY = Math.max(BEDROCK_Y + 3, surfaceH - depthBelowSurface);
+    return { originX, originY, originZ };
+  }
+
+  // Returns the material that belongs at (x,y,z) for the dungeon rooted at
+  // (originX, originY, originZ), or undefined if that position falls outside
+  // the dungeon entirely (caller should fall through to normal terrain).
+  // 'air' means "carve this empty" - distinct from undefined ("not ours").
+  function dungeonBlockAt(originX, originY, originZ, x, y, z) {
+    const dx = x - originX, dy = y - originY, dz = z - originZ;
+    if (dx < 0 || dx >= DUNGEON_W || dy < 0 || dy >= DUNGEON_H || dz < 0 || dz >= DUNGEON_D) return undefined;
+    const isDoorway = dz === 0 && dx === Math.floor(DUNGEON_W / 2) && (dy === 1 || dy === 2);
+    if (isDoorway) return 'air';
+    if (dx === 1 && dz === 1 && dy === 1) return 'chest';
+    if (dx === Math.floor(DUNGEON_W / 2) && dz === Math.floor(DUNGEON_D / 2) && dy === 1) return 'spawner';
+    const isWall = dx === 0 || dx === DUNGEON_W - 1 || dz === 0 || dz === DUNGEON_D - 1;
+    const isFloorCeil = dy === 0 || dy === DUNGEON_H - 1;
+    if (isWall || isFloorCeil) {
+      return hash3(dx * 3.3, dy * 3.3, dz * 3.3) > 0.5 ? 'mossy_cobblestone' : 'cobblestone';
+    }
+    return 'air';
+  }
+
+  function dungeonSpawnerPos(dungeon) {
+    return {
+      x: dungeon.originX + Math.floor(DUNGEON_W / 2),
+      y: dungeon.originY + 1,
+      z: dungeon.originZ + Math.floor(DUNGEON_D / 2)
+    };
+  }
+
   return {
-    CHUNK_SIZE, BEDROCK_Y, DIRT_DEPTH, WATER_LEVEL,
+    CHUNK_SIZE, BEDROCK_Y, DIRT_DEPTH, WATER_LEVEL, DUNGEON_W, DUNGEON_H, DUNGEON_D,
     heightAt, treeAt, biomeAt, materialAt, isCave, oreAt,
-    generateChunkColumns, worldToChunk, hash
+    generateChunkColumns, worldToChunk, hash,
+    dungeonAt, dungeonBlockAt, dungeonSpawnerPos
   };
 });
