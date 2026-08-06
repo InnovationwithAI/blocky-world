@@ -1356,9 +1356,8 @@ function renderHotbar() {
   if (heldSpecial) {
     const slot = document.createElement('div');
     slot.className = 'slot active';
-    const color = heldSpecial === 'bow' ? 0xd2a679 : (MATERIAL_COLORS[heldSpecial] || 0xffffff);
     slot.innerHTML = `<span class="key">held</span><span class="count">${inventory[heldSpecial]}</span>
-      <span class="swatch" style="background:#${color.toString(16).padStart(6, '0')}"></span>`;
+      <span class="swatch" style="${swatchStyle(heldSpecial)}"></span>`;
     hotbarEl.appendChild(slot);
   }
 }
@@ -1433,12 +1432,39 @@ function canAfford(recipe) {
 const HELD_SPECIAL_ITEMS = new Set(['bed', 'lever', 'plate', 'door', 'rail', 'portal', 'bow',
   'furnace', 'glass', 'wool', 'stairs', 'slab', 'enchant_table', 'brewing_stand', 'piston', 'hopper',
   'crafting_table', 'tnt', 'bucket', 'sign']);
+// Says specifically why a recipe cannot be crafted right now, instead of a
+// generic "no" - missing a table vs. missing ingredients vs. needing a
+// lower tier first look identical to canAfford() but are very different
+// fixes for the player to make.
+function whyCantAfford(recipe) {
+  if (recipe.needsTable !== false && !findNearbyBlockOfType('crafting_table', 4)) return 'Need a crafting table nearby';
+  for (const mat in recipe.cost) {
+    const have = inventory[mat] || 0;
+    if (have < recipe.cost[mat]) return `Need ${recipe.cost[mat] - have} more ${itemNameFor(mat)}`;
+  }
+  if (recipe.requireTool) {
+    for (const t in recipe.requireTool) {
+      const have = inventory.tools[t];
+      if (!have || TOOL_TIER_RANK[have] < TOOL_TIER_RANK[recipe.requireTool[t]]) {
+        return `Craft ${recipe.requireTool[t]} ${t} first`;
+      }
+    }
+  }
+  if (recipe.tool) {
+    for (const t in recipe.tool) {
+      const have = inventory.tools[t];
+      if (have && TOOL_TIER_RANK[have] >= TOOL_TIER_RANK[recipe.tool[t]]) return `Already have ${have} ${t} or better`;
+    }
+  }
+  return "Can't craft that yet";
+}
+
 function craftRecipe(recipe) {
   if (recipe.needsTable !== false && !findNearbyBlockOfType('crafting_table', 4)) {
     showToast('Need a crafting table nearby');
     return;
   }
-  if (!canAfford(recipe)) { showToast("Can't craft that yet"); return; }
+  if (!canAfford(recipe)) { showToast(whyCantAfford(recipe)); return; }
   for (const mat in recipe.cost) inventory[mat] -= recipe.cost[mat];
   if (recipe.give) {
     for (const item in recipe.give) {
@@ -1522,6 +1548,117 @@ function itemNameFor(key) {
 }
 function swatchHex(key) { return itemColorFor(key).toString(16).padStart(6, '0'); }
 
+// ---------- Item icons ----------
+// Block materials already look right as a flat color swatch - it is the
+// same color as their in-world texture. Carried/collected items (ingots,
+// gems, food, bones, potions...) do not have that anchor, so a flat square
+// reads as generic in a way it does not for a dirt block. Draw a small
+// shape per item category instead, canvas-based like every other texture
+// in this game, cached as a data URL and reused by color.
+const ITEM_SHAPES = {
+  iron_ingot: 'ingot', gold_ingot: 'ingot',
+  diamond: 'gem', ender_pearl: 'gem',
+  coal: 'chunk', raw_iron: 'chunk', raw_gold: 'chunk',
+  apple: 'round', meat: 'round', cooked_meat: 'round', carrot: 'round', potato: 'round', fish: 'round',
+  bone: 'stick', feather: 'stick',
+  string: 'wavy',
+  potion_speed: 'bottle', potion_strength: 'bottle',
+  bow: 'bow'
+};
+const itemIconCache = {};
+function makeItemIconDataURL(shape, hexColor) {
+  const size = 32;
+  const canvas = document.createElement('canvas');
+  canvas.width = canvas.height = size;
+  const ctx = canvas.getContext('2d');
+  const c = new THREE.Color(hexColor);
+  const shade = (m) => `rgb(${Math.min(255, Math.round(c.r * 255 * m))},${Math.min(255, Math.round(c.g * 255 * m))},${Math.min(255, Math.round(c.b * 255 * m))})`;
+  switch (shape) {
+    case 'ingot':
+      ctx.fillStyle = shade(0.75);
+      ctx.beginPath();
+      ctx.moveTo(6, 21); ctx.lineTo(10, 12); ctx.lineTo(22, 12); ctx.lineTo(26, 21); ctx.lineTo(22, 25); ctx.lineTo(10, 25);
+      ctx.closePath(); ctx.fill();
+      ctx.fillStyle = shade(1.25);
+      ctx.fillRect(10, 15, 12, 3);
+      break;
+    case 'gem':
+      ctx.fillStyle = shade(1);
+      ctx.beginPath();
+      ctx.moveTo(16, 4); ctx.lineTo(27, 13); ctx.lineTo(16, 29); ctx.lineTo(5, 13);
+      ctx.closePath(); ctx.fill();
+      ctx.fillStyle = shade(1.4);
+      ctx.beginPath();
+      ctx.moveTo(16, 4); ctx.lineTo(21, 13); ctx.lineTo(16, 13);
+      ctx.closePath(); ctx.fill();
+      ctx.fillStyle = shade(0.6);
+      ctx.beginPath();
+      ctx.moveTo(16, 29); ctx.lineTo(11, 13); ctx.lineTo(16, 13);
+      ctx.closePath(); ctx.fill();
+      break;
+    case 'chunk':
+      ctx.fillStyle = shade(0.85);
+      ctx.beginPath(); ctx.ellipse(16, 18, 11, 8, 0.2, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = shade(1.15);
+      ctx.beginPath(); ctx.ellipse(11, 13, 4, 3, 0, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = shade(0.65);
+      ctx.beginPath(); ctx.ellipse(21, 22, 3, 2.5, 0, 0, Math.PI * 2); ctx.fill();
+      break;
+    case 'round':
+      ctx.fillStyle = shade(1);
+      ctx.beginPath(); ctx.ellipse(16, 17, 10, 9, 0, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = shade(1.3);
+      ctx.beginPath(); ctx.ellipse(12, 13, 3, 2.5, 0, 0, Math.PI * 2); ctx.fill();
+      break;
+    case 'stick':
+      ctx.strokeStyle = shade(1); ctx.lineWidth = 4; ctx.lineCap = 'round';
+      ctx.beginPath(); ctx.moveTo(8, 27); ctx.lineTo(24, 6); ctx.stroke();
+      ctx.strokeStyle = shade(1.3); ctx.lineWidth = 1.5;
+      ctx.beginPath(); ctx.moveTo(9, 25); ctx.lineTo(23, 8); ctx.stroke();
+      break;
+    case 'wavy':
+      ctx.strokeStyle = shade(1); ctx.lineWidth = 2.5; ctx.lineCap = 'round';
+      ctx.beginPath();
+      ctx.moveTo(6, 8);
+      ctx.bezierCurveTo(14, 14, 10, 20, 18, 24);
+      ctx.bezierCurveTo(22, 26, 20, 20, 26, 16);
+      ctx.stroke();
+      break;
+    case 'bottle':
+      ctx.fillStyle = shade(1);
+      ctx.fillRect(11, 15, 10, 12);
+      ctx.fillRect(13, 9, 6, 7);
+      ctx.strokeStyle = 'rgba(0,0,0,0.4)'; ctx.lineWidth = 1.5;
+      ctx.strokeRect(11, 15, 10, 12);
+      ctx.fillStyle = 'rgba(255,255,255,0.5)';
+      ctx.fillRect(13, 17, 2, 8);
+      break;
+    case 'bow':
+      ctx.strokeStyle = shade(1); ctx.lineWidth = 2.5; ctx.lineCap = 'round';
+      ctx.beginPath(); ctx.arc(10, 16, 12, -0.9, 0.9); ctx.stroke();
+      ctx.strokeStyle = 'rgba(255,255,255,0.7)'; ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(17, 6.5); ctx.lineTo(17, 25.5); ctx.stroke();
+      break;
+    default:
+      ctx.fillStyle = shade(1);
+      ctx.fillRect(4, 4, 24, 24);
+  }
+  return canvas.toDataURL();
+}
+function getItemIcon(key) {
+  const shape = ITEM_SHAPES[key];
+  if (!shape) return null;
+  if (!itemIconCache[key]) itemIconCache[key] = makeItemIconDataURL(shape, itemColorFor(key));
+  return itemIconCache[key];
+}
+// CSS for a swatch element - an icon shape for collected items, or the
+// existing flat color for blocks (which already look like their texture).
+function swatchStyle(key) {
+  const icon = getItemIcon(key);
+  if (icon) return `background-image:url(${icon});background-size:contain;background-repeat:no-repeat;background-position:center;`;
+  return `background:#${swatchHex(key)};`;
+}
+
 const discoveredItems = new Set();
 function renderInventoryScreen() {
   const query = invSearchEl.value.trim().toLowerCase();
@@ -1541,7 +1678,7 @@ function renderInventoryScreen() {
     cell.className = 'inv-cell' + (discovered ? '' : ' inv-empty') + (slotIdx !== -1 ? ' inv-in-hotbar' : '');
     if (discovered) {
       cell.innerHTML = `<span class="inv-count">${count}</span>
-        <span class="swatch" style="background:#${swatchHex(key)}"></span>
+        <span class="swatch" style="${swatchStyle(key)}"></span>
         <span class="inv-name">${itemNameFor(key)}${slotIdx !== -1 ? ' (slot ' + (slotIdx + 1) + ')' : ''}</span>
         ${count > 0 ? `<span class="inv-discard" title="Discard">&#10005;</span>` : ''}`;
       cell.addEventListener('click', () => {
@@ -1597,13 +1734,13 @@ function renderPocketCraft() {
     const outputKey = Object.keys(r.give || {})[0];
     const slot = document.createElement('div');
     slot.className = 'pocket-slot' + (i === pocketSelectedIndex ? ' selected' : '') + (canAfford(r) ? '' : ' unaffordable');
-    slot.innerHTML = outputKey ? `<span class="swatch" style="background:#${swatchHex(outputKey)}"></span>` : '';
+    slot.innerHTML = outputKey ? `<span class="swatch" style="${swatchStyle(outputKey)}"></span>` : '';
     slot.addEventListener('click', () => { pocketSelectedIndex = i; craftPocketSelected(); });
     pocketGridEl.appendChild(slot);
   });
   const r = POCKET_RECIPES[pocketSelectedIndex];
   const outputKey = r ? Object.keys(r.give || {})[0] : null;
-  pocketOutputEl.innerHTML = outputKey ? `<span class="swatch" style="background:#${swatchHex(outputKey)}"></span>` : '';
+  pocketOutputEl.innerHTML = outputKey ? `<span class="swatch" style="${swatchStyle(outputKey)}"></span>` : '';
   pocketLabelEl.textContent = r ? r.name : '';
 }
 function craftPocketSelected() {
