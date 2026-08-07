@@ -259,12 +259,75 @@
     return undefined;
   }
 
+  // ---------- Stronghold: a rare, deep chamber built around a ring of end
+  // portal frame blocks. The ring and the frame/portal split are computed
+  // once here so server and client always agree on exactly which cells are
+  // "frame slots" (need an Eye of Ender) versus "portal" (the activated
+  // opening) - the interior of the room is a plain 5x5 square with no
+  // border margin needed, since it already sits flush against the walls.
+  const STRONGHOLD_SIZE = 7, STRONGHOLD_H = 5;
+  const STRONGHOLD_FRAME_RING = [];
+  const STRONGHOLD_PORTAL_CELLS = [];
+  for (let dx = 1; dx <= 5; dx++) {
+    for (let dz = 1; dz <= 5; dz++) {
+      const onRing = dx === 1 || dx === 5 || dz === 1 || dz === 5;
+      (onRing ? STRONGHOLD_FRAME_RING : STRONGHOLD_PORTAL_CELLS).push({ dx, dz });
+    }
+  }
+
+  // Rarer than any other structure and buried deeper - meant to take real
+  // searching to find, like the real thing.
+  function strongholdAt(cx, cz) {
+    const roll = hash(cx * 113.3 + 41.1, cz * 113.3 - 71.9);
+    if (roll <= 0.994) return null;
+    const spanX = CHUNK_SIZE - STRONGHOLD_SIZE - 4;
+    const spanZ = CHUNK_SIZE - STRONGHOLD_SIZE - 4;
+    const localX = 2 + Math.floor(hash(cx * 3.7, cz * 3.7) * spanX);
+    const localZ = 2 + Math.floor(hash(cx * 12.9, cz * 12.9) * spanZ);
+    const originX = cx * CHUNK_SIZE + localX;
+    const originZ = cz * CHUNK_SIZE + localZ;
+    const surfaceH = heightAt(originX, originZ);
+    const depthBelowSurface = 10 + Math.floor(hash(cx * 17.3, cz * 17.3) * 14);
+    const originY = Math.max(BEDROCK_Y + 3, surfaceH - depthBelowSurface);
+    return { originX, originY, originZ };
+  }
+
+  // The portal ring lives flush in the floor (dy 0) rather than cut as a
+  // hole, so the room is walkable in every direction before it is ever
+  // activated - activation is a pure material swap layered on top by the
+  // server/client at runtime, not a change to this deterministic layout.
+  function strongholdBlockAt(originX, originY, originZ, x, y, z) {
+    const dx = x - originX, dy = y - originY, dz = z - originZ;
+    if (dx < 0 || dx >= STRONGHOLD_SIZE || dy < 0 || dy >= STRONGHOLD_H || dz < 0 || dz >= STRONGHOLD_SIZE) return undefined;
+    const isDoorway = dz === 0 && dx === 3 && (dy === 1 || dy === 2);
+    if (isDoorway) return 'air';
+    if (dy === 0) {
+      const onRing = STRONGHOLD_FRAME_RING.some((c) => c.dx === dx && c.dz === dz);
+      return onRing ? 'end_frame' : 'mossy_cobblestone';
+    }
+    const isWall = dx === 0 || dx === STRONGHOLD_SIZE - 1 || dz === 0 || dz === STRONGHOLD_SIZE - 1;
+    const isCeil = dy === STRONGHOLD_H - 1;
+    if (isWall || isCeil) {
+      return hash3(dx * 4.1, dy * 4.1, dz * 4.1) > 0.4 ? 'mossy_cobblestone' : 'cobblestone';
+    }
+    if (dx === 5 && dz === 5 && dy === 1) return 'chest';
+    return 'air';
+  }
+
+  function strongholdFrameCells(stronghold) {
+    return STRONGHOLD_FRAME_RING.map((c) => ({ x: stronghold.originX + c.dx, y: stronghold.originY, z: stronghold.originZ + c.dz }));
+  }
+  function strongholdPortalCells(stronghold) {
+    return STRONGHOLD_PORTAL_CELLS.map((c) => ({ x: stronghold.originX + c.dx, y: stronghold.originY, z: stronghold.originZ + c.dz }));
+  }
+
   return {
     CHUNK_SIZE, BEDROCK_Y, DIRT_DEPTH, WATER_LEVEL, DUNGEON_W, DUNGEON_H, DUNGEON_D,
     heightAt, treeAt, biomeAt, materialAt, isCave, oreAt,
     generateChunkColumns, worldToChunk, hash,
     dungeonAt, dungeonBlockAt, dungeonSpawnerPos,
     mineshaftAt, mineshaftBlockAt,
-    villageAt, villageBlockAt
+    villageAt, villageBlockAt,
+    strongholdAt, strongholdBlockAt, strongholdFrameCells, strongholdPortalCells
   };
 });

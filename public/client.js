@@ -263,9 +263,10 @@ const MATERIAL_COLORS = {
   nether_brick: 0x3a1414,
   coal_ore: 0x36393d, iron_ore: 0xb08968, gold_ore: 0xe6c235, diamond_ore: 0x5eead4,
   crafting_table: 0x8a5a2b, torch: 0xffcc66, tnt: 0xcc2222, sign: 0xc9a876,
-  cobblestone: 0x8a8a8a, mossy_cobblestone: 0x6b8a5a, chest: 0x9a6a2b, spawner: 0x1a2a3a
+  cobblestone: 0x8a8a8a, mossy_cobblestone: 0x6b8a5a, chest: 0x9a6a2b, spawner: 0x1a2a3a,
+  end_frame: 0x24242e, end_frame_filled: 0x2f4a3a, end_portal: 0x160029
 };
-const UNBREAKABLE = new Set(['bedrock', 'lava', 'water', 'spawner']);
+const UNBREAKABLE = new Set(['bedrock', 'lava', 'water', 'spawner', 'end_frame', 'end_frame_filled', 'end_portal']);
 const boxGeo = new THREE.BoxGeometry(1, 1, 1);
 const meshes = {};       // material -> InstancedMesh
 const meshUserData = {}; // material -> { count, capacity, positions: [] }
@@ -362,7 +363,8 @@ const MATERIAL_VARIANCE = {
   furnace: 0.35, glass: 0.15, wool: 0.2, stairs: 0.3, slab: 0.3,
   enchant_table: 0.4, brewing_stand: 0.4, piston: 0.35, hopper: 0.3, nether_brick: 0.35,
   coal_ore: 0.4, iron_ore: 0.35, gold_ore: 0.3, diamond_ore: 0.25, crafting_table: 0.35,
-  cobblestone: 0.45, mossy_cobblestone: 0.4, chest: 0.3, spawner: 0.5
+  cobblestone: 0.45, mossy_cobblestone: 0.4, chest: 0.3, spawner: 0.5,
+  end_frame: 0.3, end_frame_filled: 0.3, end_portal: 0.5
 };
 const MATERIAL_GRAIN = { wood: 'vertical', planks: 'vertical', door: 'vertical', crafting_table: 'vertical' };
 const blockTextures = {};
@@ -440,7 +442,7 @@ function updateTorchLights() {
 
 function createMeshFor(material, capacity) {
   let mat;
-  if (material === 'lava' || material === 'torch') {
+  if (material === 'lava' || material === 'torch' || material === 'end_portal') {
     mat = new THREE.MeshBasicMaterial({ map: blockTextures[material] }); // unlit - glows in the dark
   } else if (material === 'water') {
     // Phong (not Lambert) so sunlight puts a moving specular glint on the surface, like real water.
@@ -712,6 +714,7 @@ function loadChunk(cx, cz, columns, edits) {
   const dungeon = World.dungeonAt(cx, cz);
   const mineshaft = World.mineshaftAt(cx, cz);
   const village = World.villageAt(cx, cz);
+  const stronghold = World.strongholdAt(cx, cz);
   for (const localKey in columns) {
     const [lx, lz] = localKey.split(',').map(Number);
     const wx = cx * CHUNK_SIZE + lx;
@@ -741,6 +744,13 @@ function loadChunk(cx, cz, columns, edits) {
         const vBlock = World.villageBlockAt(village, wx, y, wz);
         if (vBlock !== undefined) {
           if (vBlock !== 'air') addBlockInstance(wx, y, wz, vBlock, chunkKey);
+          continue;
+        }
+      }
+      if (stronghold) {
+        const sBlock = World.strongholdBlockAt(stronghold.originX, stronghold.originY, stronghold.originZ, wx, y, wz);
+        if (sBlock !== undefined) {
+          if (sBlock !== 'air') addBlockInstance(wx, y, wz, sBlock, chunkKey);
           continue;
         }
       }
@@ -778,6 +788,7 @@ function loadChunk(cx, cz, columns, edits) {
     const edit = edits[localKey];
     if (edit.action === 'remove') removeBlockInstance(wx, y, wz);
     else {
+      if (blockAt.has(bkey(wx, y, wz))) removeBlockInstance(wx, y, wz); // replace whatever procedural gen put here (e.g. a filled end portal frame)
       addBlockInstance(wx, y, wz, edit.material, chunkKey);
       if (edit.material === 'sign' && edit.text != null) signTexts.set(bkey(wx, y, wz), edit.text);
     }
@@ -1147,6 +1158,7 @@ socket.on('blockEdit', ({ x, y, z, action, material, text }) => {
     if (blockAt.has(bkey(x, y, z))) removeBlockInstance(x, y, z); // replace in place (e.g. crop growth)
     addBlockInstance(x, y, z, material, chunkKey);
     if (material === 'sign' && text != null) signTexts.set(bkey(x, y, z), text);
+    if (material === 'end_frame_filled') checkPortalActivation(x, y, z);
   }
 });
 socket.on('respawn', ({ x, y, z, fromNether }) => {
@@ -1337,7 +1349,7 @@ function makeDefaultInventory() {
     crafting_table: 0, coal: 0, raw_iron: 0, raw_gold: 0, iron_ingot: 0, gold_ingot: 0, diamond: 0,
     torch: 0, boat: 0, tnt: 0, bucket: 0,
     shears: 0, compass: 0, bone: 0, string: 0, ender_pearl: 0, feather: 0, sign: 0,
-    cobblestone: 0, mossy_cobblestone: 0,
+    cobblestone: 0, mossy_cobblestone: 0, eye_of_ender: 0,
     tools: { pickaxe: null, axe: null, sword: null, armor: null }
   };
 }
@@ -1440,7 +1452,8 @@ const RECIPES = [
   { id: 'bucket', name: 'Bucket (3 iron ingots)', cost: { iron_ingot: 3 }, give: { bucket: 1 } },
   { id: 'shears', name: 'Shears (2 iron ingots)', cost: { iron_ingot: 2 }, give: { shears: 1 } },
   { id: 'compass', name: 'Compass (4 iron ingots)', cost: { iron_ingot: 4 }, give: { compass: 1 } },
-  { id: 'sign', name: 'Sign x2 (2 planks)', cost: { planks: 2 }, give: { sign: 2 }, needsTable: false }
+  { id: 'sign', name: 'Sign x2 (2 planks)', cost: { planks: 2 }, give: { sign: 2 }, needsTable: false },
+  { id: 'eye_of_ender', name: 'Eye of Ender (1 ender pearl + 1 gold ingot)', cost: { ender_pearl: 1, gold_ingot: 1 }, give: { eye_of_ender: 1 } }
 ];
 let craftMenuOpen = false;
 let craftSelectedIndex = 0;
@@ -1564,7 +1577,8 @@ const ITEM_DISPLAY = {
   bone: { name: 'Bone', color: 0xe8e0c8 }, string: { name: 'String', color: 0xe8e8e0 },
   ender_pearl: { name: 'Ender Pearl', color: 0x2fae8f },
   feather: { name: 'Feather', color: 0xf0f0e8 }, sign: { name: 'Sign' },
-  cobblestone: { name: 'Cobblestone' }, mossy_cobblestone: { name: 'Mossy Cobblestone' }
+  cobblestone: { name: 'Cobblestone' }, mossy_cobblestone: { name: 'Mossy Cobblestone' },
+  eye_of_ender: { name: 'Eye of Ender', color: 0x3ecf8e }
 };
 let invScreenOpen = false;
 const invScreenEl = document.getElementById('inv-screen');
@@ -1599,7 +1613,7 @@ const ITEM_SHAPES = {
   bone: 'stick', feather: 'stick',
   string: 'wavy',
   potion_speed: 'bottle', potion_strength: 'bottle',
-  bow: 'bow'
+  bow: 'bow', eye_of_ender: 'eye'
 };
 const itemIconCache = {};
 function makeItemIconDataURL(shape, hexColor) {
@@ -1674,6 +1688,16 @@ function makeItemIconDataURL(shape, hexColor) {
       ctx.beginPath(); ctx.arc(10, 16, 12, -0.9, 0.9); ctx.stroke();
       ctx.strokeStyle = 'rgba(255,255,255,0.7)'; ctx.lineWidth = 1;
       ctx.beginPath(); ctx.moveTo(17, 6.5); ctx.lineTo(17, 25.5); ctx.stroke();
+      break;
+    case 'eye':
+      ctx.fillStyle = shade(0.8);
+      ctx.beginPath(); ctx.ellipse(16, 16, 13, 8, 0, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = shade(1.2);
+      ctx.beginPath(); ctx.ellipse(16, 16, 8, 8, 0, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = 'rgba(10,0,20,0.9)';
+      ctx.beginPath(); ctx.ellipse(16, 16, 2.4, 7, 0, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = 'rgba(255,255,255,0.6)';
+      ctx.beginPath(); ctx.ellipse(12, 11, 2, 1.4, -0.4, 0, Math.PI * 2); ctx.fill();
       break;
     default:
       ctx.fillStyle = shade(1);
@@ -1904,6 +1928,7 @@ document.addEventListener('keydown', (e) => {
     case 'KeyH': goFishing(); break;
     case 'KeyJ': if (gameStarted && !spectatorMode && !gameOver) minePressed = true; break;
     case 'KeyK': if (gameStarted && !spectatorMode && !gameOver) placeBlock(); break;
+    case 'KeyU': senseStronghold(); break;
   }
 });
 document.addEventListener('keyup', (e) => {
@@ -2293,6 +2318,44 @@ function updateCompass() {
   compassNeedleEl.style.transform = `rotate(${relativeAngle}rad)`;
 }
 
+// Strongholds are rare and buried - without some way to point toward one,
+// finding one would mean digging at random for a very long time. Real
+// Minecraft throws the eye and watches it fly; this reads the same intent
+// (spend an eye, learn a direction) without needing a thrown-item physics
+// system. Search radius is generous since even at ~0.6% of chunks it can
+// take a wide scan to find the nearest one.
+const STRONGHOLD_SEARCH_RADIUS = 40;
+function senseStronghold() {
+  if (!(inventory.eye_of_ender > 0)) { showToast('Need an Eye of Ender'); return; }
+  const px = camera.position.x, pz = camera.position.z;
+  const [pcx, pcz] = World.worldToChunk(Math.round(px), Math.round(pz));
+  let nearest = null, nearestDistSq = Infinity;
+  for (let dcx = -STRONGHOLD_SEARCH_RADIUS; dcx <= STRONGHOLD_SEARCH_RADIUS; dcx++) {
+    for (let dcz = -STRONGHOLD_SEARCH_RADIUS; dcz <= STRONGHOLD_SEARCH_RADIUS; dcz++) {
+      const s = World.strongholdAt(pcx + dcx, pcz + dcz);
+      if (!s) continue;
+      const d = (s.originX - px) ** 2 + (s.originZ - pz) ** 2;
+      if (d < nearestDistSq) { nearestDistSq = d; nearest = s; }
+    }
+  }
+  if (!nearest) { showToast('The eye senses nothing within range - keep exploring'); return; }
+  inventory.eye_of_ender -= 1;
+  renderHotbar();
+  const dist = Math.round(Math.sqrt(nearestDistSq));
+  const dx = nearest.originX - px, dz = nearest.originZ - pz;
+  const targetAngle = Math.atan2(-dx, -dz); // same convention as the compass needle
+  let rel = targetAngle - camera.rotation.y;
+  rel = ((rel % (Math.PI * 2)) + Math.PI * 3) % (Math.PI * 2) - Math.PI;
+  const deg = rel * 180 / Math.PI, a = Math.abs(deg);
+  let bearing;
+  if (a < 22.5) bearing = 'straight ahead';
+  else if (a < 67.5) bearing = deg > 0 ? 'ahead and to your right' : 'ahead and to your left';
+  else if (a < 112.5) bearing = deg > 0 ? 'to your right' : 'to your left';
+  else if (a < 157.5) bearing = deg > 0 ? 'behind and to your right' : 'behind and to your left';
+  else bearing = 'behind you';
+  showToast(`The eye flickers ${bearing}, roughly ${dist} blocks away`);
+}
+
 const TOOL_ENCHANT_BONUS = { sword: 3 };
 function useNearbyBlock() {
   const sign = findNearbyBlockOfType('sign', 3);
@@ -2302,7 +2365,52 @@ function useNearbyBlock() {
   if (findNearbyBlockOfType('furnace', 3)) { smeltAtFurnace(); return; }
   if (findNearbyBlockOfType('enchant_table', 3)) { enchantTool(); return; }
   if (findNearbyBlockOfType('brewing_stand', 3)) { brewPotion(); return; }
-  showToast('No sign, chest, furnace, enchant table, or brewing stand nearby');
+  const frame = findNearbyBlockOfType('end_frame', 3);
+  if (frame) { placeEyeOfEnder(frame); return; }
+  showToast('No sign, chest, furnace, enchant table, brewing stand, or portal frame nearby');
+}
+
+// Filling a frame is just a normal block replacement (end_frame -> end_frame_filled)
+// broadcast and persisted through the same blockEdit pipeline every other build
+// action uses - no bespoke server state needed. Whichever fill happens to be the
+// 16th, locally or received from another player, is the one that notices the ring
+// is complete and lights the portal.
+function placeEyeOfEnder(frame) {
+  if ((inventory.eye_of_ender || 0) <= 0) { showToast('Need an Eye of Ender'); return; }
+  inventory.eye_of_ender -= 1;
+  renderHotbar();
+  const [fcx, fcz] = World.worldToChunk(frame.x, frame.z);
+  removeBlockInstance(frame.x, frame.y, frame.z);
+  addBlockInstance(frame.x, frame.y, frame.z, 'end_frame_filled', fcx + ',' + fcz);
+  socket.emit('blockEdit', { x: frame.x, y: frame.y, z: frame.z, action: 'add', material: 'end_frame_filled' });
+  showToast('Placed an Eye of Ender');
+  checkPortalActivation(frame.x, frame.y, frame.z);
+}
+
+function checkPortalActivation(x, y, z) {
+  const [cx, cz] = World.worldToChunk(x, z);
+  const stronghold = World.strongholdAt(cx, cz);
+  if (!stronghold) return;
+  const frames = World.strongholdFrameCells(stronghold);
+  const allFilled = frames.every((c) => {
+    const entry = blockAt.get(bkey(c.x, c.y, c.z));
+    return entry && entry.material === 'end_frame_filled';
+  });
+  if (!allFilled) return;
+  const portalCells = World.strongholdPortalCells(stronghold);
+  const alreadyActive = portalCells.every((c) => {
+    const entry = blockAt.get(bkey(c.x, c.y, c.z));
+    return entry && entry.material === 'end_portal';
+  });
+  if (alreadyActive) return;
+  for (const c of portalCells) {
+    const [pcx, pcz] = World.worldToChunk(c.x, c.z);
+    removeBlockInstance(c.x, c.y, c.z);
+    addBlockInstance(c.x, c.y, c.z, 'end_portal', pcx + ',' + pcz);
+    socket.emit('blockEdit', { x: c.x, y: c.y, z: c.z, action: 'add', material: 'end_portal' });
+  }
+  showToast('The stronghold portal roars to life...');
+  unlockAchievement('stronghold_portal', 'Portal Seeker');
 }
 
 function smeltAtFurnace() {
