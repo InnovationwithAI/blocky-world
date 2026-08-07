@@ -343,6 +343,126 @@ io.on('connection', (socket) => {
   });
 });
 
+// ---------- Mob collision ----------
+// The server never used to check terrain at all for mob movement - entities
+// just walked in a straight line toward their target (or a random wander
+// heading) and had their y snapped to World.heightAt every tick, so they
+// drifted through walls, dungeon rooms, village houses, cliffs, anything
+// that was not the exact natural ground column. Players already get this
+// for free client-side via isSolidBlock/canStandAt; mobs need the server-
+// side equivalent since entities are server-authoritative.
+//
+// This mirrors loadChunk's per-block precedence (persisted edit, then each
+// structure type, then natural terrain/caves) as a single-point query
+// instead of a whole-chunk build, since collision only ever needs to ask
+// "what is at this one spot" a few times per entity per tick. Tree
+// trunks/leaves are the one thing this does not know about - that geometry
+// only exists client-side in buildTree - so mobs can still walk through a
+// tree; everything solid the client actually persists or the world
+// procedurally builds as a structure is covered.
+function materialAtServer(x, y, z, dim) {
+  const wx = Math.round(x), wy = Math.round(y), wz = Math.round(z);
+  const editKey = dim === 'nether' ? NETHER_KEY : chunkEditKeyFor(wx, wz);
+  const edits = chunkEdits[editKey];
+  if (edits) {
+    let ek;
+    if (dim === 'nether') {
+      ek = wx + ',' + wy + ',' + wz;
+    } else {
+      const [ecx, ecz] = World.worldToChunk(wx, wz);
+      ek = (wx - ecx * World.CHUNK_SIZE) + ',' + wy + ',' + (wz - ecz * World.CHUNK_SIZE);
+    }
+    const edit = edits[ek];
+    if (edit) return edit.action === 'remove' ? null : edit.material;
+  }
+  if (dim === 'nether') return null; // nether terrain is entirely edit-placed by buildNetherArena
+  const [cx, cz] = World.worldToChunk(wx, wz);
+  const dungeon = World.dungeonAt(cx, cz);
+  if (dungeon) {
+    const b = World.dungeonBlockAt(dungeon.originX, dungeon.originY, dungeon.originZ, wx, wy, wz);
+    if (b !== undefined) return b === 'air' ? null : b;
+  }
+  const mineshaft = World.mineshaftAt(cx, cz);
+  if (mineshaft) {
+    const b = World.mineshaftBlockAt(mineshaft.originX, mineshaft.originY, mineshaft.originZ, wx, wy, wz);
+    if (b !== undefined) return b === 'air' ? null : b;
+  }
+  const village = World.villageAt(cx, cz);
+  if (village) {
+    const b = World.villageBlockAt(village, wx, wy, wz);
+    if (b !== undefined) return b === 'air' ? null : b;
+  }
+  const stronghold = World.strongholdAt(cx, cz);
+  if (stronghold) {
+    const b = World.strongholdBlockAt(stronghold.originX, stronghold.originY, stronghold.originZ, wx, wy, wz);
+    if (b !== undefined) return b === 'air' ? null : b;
+  }
+  const height = World.heightAt(wx, wz);
+  if (wy >= height) return (height <= World.WATER_LEVEL && wy <= World.WATER_LEVEL) ? 'water' : null;
+  if (World.isCave(wx, wy, wz, height)) return null;
+  return World.materialAt(wx, wy, wz, height, World.biomeAt(wx, wz));
+}
+
+// Same rule the client uses for the player (isSolidBlock in client.js): any
+// block that exists there is solid except water.
+function entityBlockedAt(x, y, z, dim) {
+  // ent.y tracks roughly eye height (groundHeight + 1.5); sample near the
+  // feet and near the head so a mob cannot squeeze under a low wall or
+  // through a doorway lintel it should not fit through.
+  for (const sy of [y - 1.3, y - 0.2]) {
+    const m = materialAtServer(x, sy, z, dim);
+    if (m && m !== 'water') return true;
+  }
+  return false;
+}
+
+// Moves toward (nx, nz) if clear; if the direct path is blocked, tries
+// sliding along just one axis, so a mob brushing past a wall corner or
+// a doorway keeps moving instead of freezing dead the instant it grazes
+// anything solid.
+function moveEntityTowards(ent, nx, nz) {
+  if (!entityBlockedAt(nx, ent.y, nz, ent.dim)) { ent.x = nx; ent.z = nz; return; }
+  if (!entityBlockedAt(nx, ent.y, ent.z, ent.dim)) { ent.x = nx; return; }
+  if (!entityBlockedAt(ent.x, ent.y, nz, ent.dim)) { ent.z = nz; }
+}
+
+// Every hostile/passive mob used to just snap to World.heightAt each tick -
+// the natural surface height, full stop, no matter what was actually above
+// or below the mob. That is fine in the open but is a much more obvious
+// version of "walks through blocks" underground: a dungeon spawner mob
+// would spawn correctly on the dungeon floor, then on its very next tick
+// snap straight up through the dungeon's own ceiling and the many blocks
+// of stone above it to stand on the natural surface, since heightAt has no
+// idea a buried room (or a player-dug hole, or a player-built platform) is
+// there. Searching a few blocks around the mob's current altitude for the
+// nearest actual solid surface finds that structure's real floor instead.
+//
+// Deliberately never searches above hintY. A dungeon interior is only 2
+// blocks of clear air under its ceiling, and this runs every tick using
+// the mob's own previous result as the next hint - any upward margin at
+// all, even one block, lets the ceiling fall within reach of the search.
+// Once that happens the mob "finds" the ceiling as ground once, and from
+// that new (wrong, one block higher) position the same margin reaches the
+// natural stone one block above *that*, and so on - a one-way ratchet that
+// walks the mob straight up through the entire overburden to the surface
+// with no way back down, since the search only ever looks down from
+// wherever it last decided was ground. Mobs here have no jump/step-climb
+// behavior to preserve, so there is no real downside to only ever settling
+// at or below the previous position.
+// Returns a value directly usable as ent.y (the same "ground surface + 1.5"
+// convention every entity has always used - see the spawn sites below and
+// the old World.heightAt(...) + 1.5 this replaced), not the bare surface
+// height - callers should not add 1.5 again on top of this.
+function groundYAt(x, z, dim, hintY) {
+  const wx = Math.round(x), wz = Math.round(z);
+  const startY = hintY != null ? Math.round(hintY) : World.heightAt(wx, wz);
+  for (let y = startY; y >= World.BEDROCK_Y; y--) {
+    const m = materialAtServer(wx, y, wz, dim);
+    if (m && m !== 'water') return y + 1 + 1.5;
+  }
+  return World.heightAt(wx, wz) + 1.5;
+}
+
 // ---------- Server tick: entity AI, spawning, hunger/health, crops ----------
 const TICK_MS = 150;
 setInterval(() => {
@@ -468,9 +588,14 @@ setInterval(() => {
             ent.teleportT = 3000 + Math.random() * 2000;
             const angle = Math.random() * Math.PI * 2;
             const dist = 2 + Math.random() * 3;
-            ent.x = nearest.x + Math.cos(angle) * dist;
-            ent.z = nearest.z + Math.sin(angle) * dist;
-            if (ent.dim === 'overworld') ent.y = World.heightAt(Math.round(ent.x), Math.round(ent.z)) + 1.5;
+            const tx = nearest.x + Math.cos(angle) * dist;
+            const tz = nearest.z + Math.sin(angle) * dist;
+            const ty = ent.dim === 'overworld' ? groundYAt(tx, tz, ent.dim, ent.y - 1.5) : ent.y;
+            // Do not teleport into a wall - if this spot is blocked, just
+            // skip the teleport this cycle and try again next timer.
+            if (!entityBlockedAt(tx, ty, tz, ent.dim)) {
+              ent.x = tx; ent.z = tz; ent.y = ty;
+            }
           }
         } else {
           const dx = nearest.x - ent.x, dz = nearest.z - ent.z;
@@ -479,10 +604,9 @@ setInterval(() => {
           const keepDistance = isRanged ? 6 : 0;
           const speed = (ent.kind === 'boss' ? 1.6 : ent.kind === 'spider' ? 1.8 : ent.kind === 'creeper' ? 1.3 : 1.2) * (TICK_MS / 1000);
           if (len > keepDistance + 1) {
-            ent.x += (dx / len) * speed;
-            ent.z += (dz / len) * speed;
+            moveEntityTowards(ent, ent.x + (dx / len) * speed, ent.z + (dz / len) * speed);
           }
-          if (ent.dim === 'overworld') ent.y = World.heightAt(Math.round(ent.x), Math.round(ent.z)) + 1.5;
+          if (ent.dim === 'overworld') ent.y = groundYAt(ent.x, ent.z, ent.dim, ent.y - 1.5);
         }
         // True 3D distance - horizontal-only would let a mob below you in a
         // ravine or above you on a ledge still land hits just for being
@@ -516,9 +640,13 @@ setInterval(() => {
         ent.wanderT = 2000 + Math.random() * 3000;
       }
       const speed = 0.4 * (TICK_MS / 1000);
-      ent.x += Math.cos(ent.wanderAngle || 0) * speed;
-      ent.z += Math.sin(ent.wanderAngle || 0) * speed;
-      ent.y = World.heightAt(Math.round(ent.x), Math.round(ent.z)) + 1.5;
+      const beforeX = ent.x, beforeZ = ent.z;
+      moveEntityTowards(ent, ent.x + Math.cos(ent.wanderAngle || 0) * speed, ent.z + Math.sin(ent.wanderAngle || 0) * speed);
+      // Fully boxed in (e.g. wandered up against a wall) - pick a new
+      // heading now instead of standing there facing it until the regular
+      // wander timer happens to come around.
+      if (ent.x === beforeX && ent.z === beforeZ) ent.wanderT = 0;
+      ent.y = groundYAt(ent.x, ent.z, ent.dim, ent.y - 1.5);
     }
   }
 
