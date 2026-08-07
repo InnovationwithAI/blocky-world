@@ -61,10 +61,17 @@ const sfx = {
 const scene = new THREE.Scene();
 const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
 const renderer = new THREE.WebGLRenderer({ antialias: true });
+// Without this, three.js renders at 1 device pixel per CSS pixel regardless
+// of the display - on any Retina/HiDPI screen (which is most laptops and
+// tablets today) that means the whole game is upscaled from a lower-res
+// buffer and reads as soft/blurry no matter how good the textures are.
+// Capped at 2x since going higher costs a lot of fill rate for a difference
+// nobody can see.
+renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
 renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.outputEncoding = THREE.sRGBEncoding;
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
-renderer.toneMappingExposure = 1.15;
+renderer.toneMappingExposure = 1.05;
 renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 renderer.autoClear = false; // main scene + a separate overlay pass for the first-person hand
@@ -271,20 +278,50 @@ const boxGeo = new THREE.BoxGeometry(1, 1, 1);
 const meshes = {};       // material -> InstancedMesh
 const meshUserData = {}; // material -> { count, capacity, positions: [] }
 
-// Small procedural noise texture per material - crisp/pixelated on purpose,
-// so blocks read as textured surfaces instead of flat plastic color.
+function smoothstep(t) { return t * t * (3 - 2 * t); }
+// Coarse-grid value noise sampled smoothly, for soft low-frequency blotches
+// (leaf clusters, stone mottling, grain patches). Pure per-pixel hash noise
+// (what these textures used before) has every pixel independent of its
+// neighbors, which reads as flat TV static rather than an actual material -
+// real surfaces have texture at more than one scale. seedX/seedY just keep
+// different materials from sharing the exact same blotch layout.
+function makeBlotchField(cells, seedX, seedY) {
+  const grid = [];
+  for (let cy = 0; cy <= cells; cy++) {
+    grid[cy] = [];
+    for (let cx = 0; cx <= cells; cx++) {
+      let n = Math.sin(cx * 12.9898 + cy * 78.233 + seedX * 0.0037 + seedY * 0.0091) * 43758.5453;
+      grid[cy][cx] = n - Math.floor(n);
+    }
+  }
+  return function (u, v) {
+    const fx = u * cells, fy = v * cells;
+    const x0 = Math.floor(fx), y0 = Math.floor(fy);
+    const sx = smoothstep(fx - x0), sy = smoothstep(fy - y0);
+    const n00 = grid[y0][x0], n10 = grid[y0][x0 + 1];
+    const n01 = grid[y0 + 1][x0], n11 = grid[y0 + 1][x0 + 1];
+    return (n00 * (1 - sx) + n10 * sx) * (1 - sy) + (n01 * (1 - sx) + n11 * sx) * sy;
+  };
+}
+// Procedural texture per material, blending soft low-frequency blotches with
+// a finer per-pixel grain on top - crisp/pixelated on purpose (nearest-
+// filtered), so blocks read as textured surfaces instead of flat plastic
+// color, but with clumps of light/dark like a real material rather than
+// uniform static.
 function makeBlockTexture(hexColor, variance, grain) {
-  const size = 32;
+  const size = 48;
   const canvas = document.createElement('canvas');
   canvas.width = canvas.height = size;
   const ctx = canvas.getContext('2d');
   const base = new THREE.Color(hexColor);
+  const blotch = makeBlotchField(5, hexColor, variance * 1000);
   for (let y = 0; y < size; y++) {
     for (let x = 0; x < size; x++) {
-      let n = Math.sin(x * 12.9898 + y * 78.233) * 43758.5453;
-      n = n - Math.floor(n);
-      if (grain === 'vertical') n = (n + (x % 3) * 0.15) % 1;
-      const shade = 1 + (n - 0.5) * variance;
+      let fine = Math.sin(x * 12.9898 + y * 78.233) * 43758.5453;
+      fine = fine - Math.floor(fine);
+      if (grain === 'vertical') fine = (fine + (x % 3) * 0.15) % 1;
+      const combined = blotch(x / size, y / size) * 0.65 + fine * 0.35;
+      const shade = 1 + (combined - 0.5) * variance;
       const r = Math.min(255, Math.max(0, Math.round(base.r * 255 * shade)));
       const g = Math.min(255, Math.max(0, Math.round(base.g * 255 * shade)));
       const b = Math.min(255, Math.max(0, Math.round(base.b * 255 * shade)));
@@ -301,19 +338,21 @@ function makeBlockTexture(hexColor, variance, grain) {
 // Grass's side face: dirt base with a jagged green fringe near the top,
 // like the classic grass-over-dirt look, instead of a flat green cube.
 function makeGrassSideTexture() {
-  const size = 32;
+  const size = 48;
   const canvas = document.createElement('canvas');
   canvas.width = canvas.height = size;
   const ctx = canvas.getContext('2d');
   const dirt = new THREE.Color(MATERIAL_COLORS.dirt);
   const grass = new THREE.Color(MATERIAL_COLORS.grass);
+  const blotch = makeBlotchField(5, 4242, 1717);
   for (let y = 0; y < size; y++) {
     for (let x = 0; x < size; x++) {
-      let n = Math.sin(x * 12.9898 + y * 78.233) * 43758.5453;
-      n = n - Math.floor(n);
-      const edge = size * 0.24 + n * 4;
+      let fine = Math.sin(x * 12.9898 + y * 78.233) * 43758.5453;
+      fine = fine - Math.floor(fine);
+      const edge = size * 0.24 + fine * 5;
       const base = y < edge ? grass : dirt;
-      const shade = 1 + (n - 0.5) * 0.4;
+      const combined = blotch(x / size, y / size) * 0.6 + fine * 0.4;
+      const shade = 1 + (combined - 0.5) * 0.4;
       const r = Math.min(255, Math.max(0, Math.round(base.r * 255 * shade)));
       const g = Math.min(255, Math.max(0, Math.round(base.g * 255 * shade)));
       const b = Math.min(255, Math.max(0, Math.round(base.b * 255 * shade)));
@@ -330,7 +369,7 @@ function makeGrassSideTexture() {
 
 // Log end-grain: concentric rings for the top/bottom faces of a wood block.
 function makeRingsTexture(hexColor) {
-  const size = 32;
+  const size = 48;
   const canvas = document.createElement('canvas');
   canvas.width = canvas.height = size;
   const ctx = canvas.getContext('2d');
@@ -445,8 +484,12 @@ function createMeshFor(material, capacity) {
   if (material === 'lava' || material === 'torch' || material === 'end_portal') {
     mat = new THREE.MeshBasicMaterial({ map: blockTextures[material] }); // unlit - glows in the dark
   } else if (material === 'water') {
-    // Phong (not Lambert) so sunlight puts a moving specular glint on the surface, like real water.
-    mat = buildFaceMaterials(material, { transparent: true, opacity: 0.78, specular: 0x99ccff, shininess: 90 }, THREE.MeshPhongMaterial);
+    // Phong (not Lambert) so sunlight puts a moving specular glint on the
+    // surface, like real water. Higher shininess keeps that glint a small
+    // tight sparkle instead of a broad highlight; a near-white specular
+    // color at low shininess used to wash the whole surface out to pale
+    // gray-white at grazing viewing angles, which read as "not water".
+    mat = buildFaceMaterials(material, { transparent: true, opacity: 0.88, specular: 0x4a7ab0, shininess: 220 }, THREE.MeshPhongMaterial);
   } else {
     mat = buildFaceMaterials(material);
   }
@@ -2952,8 +2995,18 @@ function animate() {
     scene.fog.near = 50;
     scene.fog.far = 110;
   }
-  sunLight.intensity = 0.25 + 0.95 * brightness;
-  hemiLight.intensity = 0.35 + 0.75 * brightness;
+  // Sun stays clearly dominant over the ambient hemisphere light (roughly a
+  // 4:1 ratio at full day) so shadowed ground actually reads darker than lit
+  // ground - with the two close in strength (as they used to be), the
+  // always-on ambient fills in shadows almost as brightly as direct sun,
+  // which is why shadows barely showed up and everything looked flat.
+  // Peak values are deliberately modest (not the 2.3/0.4 this briefly had) -
+  // Lambert/Standard materials have no highlight rolloff of their own, so
+  // pushing the light past "properly lit" just clips straight to washed-out
+  // white once it hits the tonemap curve, which is exactly the "too pale"
+  // look this is fixing.
+  sunLight.intensity = 0.15 + 1.45 * brightness;
+  hemiLight.intensity = 0.2 + 0.3 * brightness;
   const angle = dayClock * Math.PI * 2;
   sunLight.position.set(
     camera.position.x + Math.cos(angle) * 60,
