@@ -188,10 +188,83 @@
     };
   }
 
+  // ---------- Mineshaft: a short supported tunnel with a rail line and a
+  // loot chest at the far end. No explicit walls - it carves through
+  // whatever stone is there and lets the surrounding terrain be the walls,
+  // same as a real mineshaft cutting through rock rather than a built room.
+  const MINESHAFT_LEN = 10, MINESHAFT_W = 3, MINESHAFT_H = 3;
+
+  function mineshaftAt(cx, cz) {
+    const roll = hash(cx * 63.1 + 29.3, cz * 63.1 - 41.7);
+    if (roll <= 0.98) return null;
+    const spanX = CHUNK_SIZE - MINESHAFT_LEN - 4;
+    const spanZ = CHUNK_SIZE - MINESHAFT_W - 4;
+    const localX = 2 + Math.floor(hash(cx * 4.3, cz * 4.3) * spanX);
+    const localZ = 2 + Math.floor(hash(cx * 9.9, cz * 9.9) * spanZ);
+    const originX = cx * CHUNK_SIZE + localX;
+    const originZ = cz * CHUNK_SIZE + localZ;
+    const surfaceH = heightAt(originX, originZ);
+    const depthBelowSurface = 6 + Math.floor(hash(cx * 15.7, cz * 15.7) * 12);
+    const originY = Math.max(BEDROCK_Y + 3, surfaceH - depthBelowSurface);
+    return { originX, originY, originZ };
+  }
+
+  function mineshaftBlockAt(originX, originY, originZ, x, y, z) {
+    const dx = x - originX, dy = y - originY, dz = z - originZ;
+    if (dx < 0 || dx >= MINESHAFT_LEN || dy < 0 || dy >= MINESHAFT_H || dz < 0 || dz >= MINESHAFT_W) return undefined;
+    const isSupportPost = (dx % 4 === 0) && dy <= 1 && (dz === 0 || dz === MINESHAFT_W - 1);
+    const isSupportBeam = (dx % 4 === 0) && dy === MINESHAFT_H - 1;
+    if (isSupportPost || isSupportBeam) return 'wood';
+    if (dy === 0) return dz === 1 ? 'rail' : 'planks';
+    if (dx === MINESHAFT_LEN - 2 && dz === 1 && dy === 1) return 'chest';
+    return 'air';
+  }
+
+  // ---------- Village: a small cluster of huts, each with a door and a
+  // crafting table, close enough together to read as a settlement.
+  const HOUSE_SIZE = 4;
+  const VILLAGE_HOUSE_OFFSETS = [{ dx: 0, dz: 0 }, { dx: 6, dz: 1 }, { dx: 2, dz: 7 }];
+  const VILLAGE_FOOTPRINT_X = 10, VILLAGE_FOOTPRINT_Z = 11;
+
+  function houseBlockAt(dx, dy, dz) {
+    if (dx < 0 || dx >= HOUSE_SIZE || dy < 0 || dy >= HOUSE_SIZE || dz < 0 || dz >= HOUSE_SIZE) return undefined;
+    if (dz === 0 && dx === 1 && (dy === 1 || dy === 2)) return 'air'; // doorway
+    if (dy === HOUSE_SIZE - 1) return 'stairs'; // flat roof
+    if (dy === 0) return 'planks'; // floor
+    if (dx === 0 || dx === HOUSE_SIZE - 1 || dz === 0 || dz === HOUSE_SIZE - 1) return 'planks'; // walls
+    if (dx === 2 && dz === 2 && dy === 1) return 'crafting_table';
+    return 'air';
+  }
+
+  function villageAt(cx, cz) {
+    const roll = hash(cx * 53.3 - 7.7, cz * 53.3 + 19.1);
+    if (roll <= 0.992) return null; // rarer than dungeons/mineshafts - feels special
+    const spanX = CHUNK_SIZE - VILLAGE_FOOTPRINT_X - 4;
+    const spanZ = CHUNK_SIZE - VILLAGE_FOOTPRINT_Z - 4;
+    const localX = 2 + Math.floor(hash(cx * 6.1, cz * 6.1) * spanX);
+    const localZ = 2 + Math.floor(hash(cx * 8.9, cz * 8.9) * spanZ);
+    return { originX: cx * CHUNK_SIZE + localX, originZ: cz * CHUNK_SIZE + localZ };
+  }
+
+  // Each house sits on its own local ground height (not the village
+  // anchor's), so a house on a slope still sits flush with the terrain
+  // right under it instead of floating or sinking.
+  function villageBlockAt(village, x, y, z) {
+    for (const off of VILLAGE_HOUSE_OFFSETS) {
+      const hx = village.originX + off.dx, hz = village.originZ + off.dz;
+      const hy = heightAt(hx, hz);
+      const b = houseBlockAt(x - hx, y - hy, z - hz);
+      if (b !== undefined) return b;
+    }
+    return undefined;
+  }
+
   return {
     CHUNK_SIZE, BEDROCK_Y, DIRT_DEPTH, WATER_LEVEL, DUNGEON_W, DUNGEON_H, DUNGEON_D,
     heightAt, treeAt, biomeAt, materialAt, isCave, oreAt,
     generateChunkColumns, worldToChunk, hash,
-    dungeonAt, dungeonBlockAt, dungeonSpawnerPos
+    dungeonAt, dungeonBlockAt, dungeonSpawnerPos,
+    mineshaftAt, mineshaftBlockAt,
+    villageAt, villageBlockAt
   };
 });

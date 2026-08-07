@@ -392,6 +392,30 @@ setInterval(() => {
     }
   }
 
+  // villages get their own villagers, on top of the rare ambient spawn -
+  // same 3x3-chunk-neighborhood pattern as dungeon spawners above.
+  for (const [, p] of overworldPlayers) {
+    const [pcx2, pcz2] = World.worldToChunk(Math.round(p.x), Math.round(p.z));
+    for (let dcx = -1; dcx <= 1; dcx++) {
+      for (let dcz = -1; dcz <= 1; dcz++) {
+        const village = World.villageAt(pcx2 + dcx, pcz2 + dcz);
+        if (!village) continue;
+        const dist2 = (p.x - village.originX) ** 2 + (p.z - village.originZ) ** 2;
+        if (dist2 > 400) continue; // within 20 blocks
+        const nearbyVillagers = Object.values(entities).filter((e) =>
+          e.kind === 'villager' &&
+          (e.x - village.originX) ** 2 + (e.z - village.originZ) ** 2 < 400
+        ).length;
+        if (nearbyVillagers >= 3 || Math.random() >= 0.03) continue;
+        const h = World.heightAt(Math.round(village.originX), Math.round(village.originZ));
+        entities['e' + (entityIdCounter++)] = {
+          kind: 'villager', x: village.originX + 1.5, y: h + 1.5, z: village.originZ + 1.5,
+          health: 30, dim: 'overworld'
+        };
+      }
+    }
+  }
+
   if (!night) {
     // dungeon spawner mobs are exempt - the whole point is they threaten the
     // dungeon regardless of time of day, unlike the ambient night spawns

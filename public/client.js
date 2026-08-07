@@ -710,12 +710,19 @@ function loadChunk(cx, cz, columns, edits) {
   requestedChunks.delete(chunkKey);
 
   const dungeon = World.dungeonAt(cx, cz);
+  const mineshaft = World.mineshaftAt(cx, cz);
+  const village = World.villageAt(cx, cz);
   for (const localKey in columns) {
     const [lx, lz] = localKey.split(',').map(Number);
     const wx = cx * CHUNK_SIZE + lx;
     const wz = cz * CHUNK_SIZE + lz;
     const { height, tree, biome } = columns[localKey];
-    for (let y = World.BEDROCK_Y; y < height; y++) {
+    // Villages sit on the surface and each house follows its own local
+    // ground height, which can sit a little above this column's natural
+    // height on sloped terrain - extend the scan a few blocks past the
+    // surface so roof/wall blocks placed there are not silently skipped.
+    const yTop = village ? height + 6 : height;
+    for (let y = World.BEDROCK_Y; y < yTop; y++) {
       if (dungeon) {
         const dBlock = World.dungeonBlockAt(dungeon.originX, dungeon.originY, dungeon.originZ, wx, y, wz);
         if (dBlock !== undefined) {
@@ -723,6 +730,21 @@ function loadChunk(cx, cz, columns, edits) {
           continue;
         }
       }
+      if (mineshaft) {
+        const mBlock = World.mineshaftBlockAt(mineshaft.originX, mineshaft.originY, mineshaft.originZ, wx, y, wz);
+        if (mBlock !== undefined) {
+          if (mBlock !== 'air') addBlockInstance(wx, y, wz, mBlock, chunkKey);
+          continue;
+        }
+      }
+      if (village) {
+        const vBlock = World.villageBlockAt(village, wx, y, wz);
+        if (vBlock !== undefined) {
+          if (vBlock !== 'air') addBlockInstance(wx, y, wz, vBlock, chunkKey);
+          continue;
+        }
+      }
+      if (y >= height) continue; // above natural terrain and not claimed by any structure above
       if (World.isCave(wx, y, wz, height)) continue;
       addBlockInstance(wx, y, wz, World.materialAt(wx, y, wz, height, biome), chunkKey);
     }
@@ -731,6 +753,20 @@ function loadChunk(cx, cz, columns, edits) {
         addBlockInstance(wx, y, wz, 'water', chunkKey);
       }
     }
+  }
+
+  // Trees are placed in a second pass, after every column in the chunk has
+  // claimed its terrain/structure blocks. addBlockInstance silently skips
+  // occupied cells, so if tree canopies were interleaved with structure
+  // placement (single pass), a trunk column processed earlier in for-in
+  // order could plant leaves into a spot a nearby house roof or dungeon
+  // wall needed, permanently blocking the structure block from ever being
+  // placed. Running trees last guarantees structures always win.
+  for (const localKey in columns) {
+    const [lx, lz] = localKey.split(',').map(Number);
+    const wx = cx * CHUNK_SIZE + lx;
+    const wz = cz * CHUNK_SIZE + lz;
+    const { height, tree } = columns[localKey];
     if (tree) buildTree(wx, wz, height, chunkKey);
   }
 
