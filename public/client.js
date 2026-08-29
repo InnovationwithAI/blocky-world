@@ -150,6 +150,46 @@ function updateClouds(dt) {
 const DAY_SKY = new THREE.Color(0x7ec0ee);
 const NIGHT_SKY = new THREE.Color(0x0a0e2a);
 const UNDERWATER_TINT = new THREE.Color(0x1a4a7a);
+const DAY_ZENITH = new THREE.Color(0x2e6fc9);
+const NIGHT_ZENITH = new THREE.Color(0x00000a);
+
+// ---------- Sky dome ----------
+// A single flat background color reads as a wall, not open air - real skies
+// are darkest straight up and lighten toward the horizon (more atmosphere to
+// look through at a shallow angle). A big inverted sphere around the camera
+// with a two-color vertical gradient gets that cheaply, with no texture to
+// generate - the gradient is computed per-pixel in the fragment shader.
+// Hidden underwater, where the flat underwater tint already handles it.
+const skyDome = new THREE.Mesh(
+  new THREE.SphereGeometry(400, 16, 16),
+  new THREE.ShaderMaterial({
+    uniforms: {
+      topColor: { value: DAY_ZENITH.clone() },
+      bottomColor: { value: DAY_SKY.clone() }
+    },
+    vertexShader: `
+      varying vec3 vWorldPosition;
+      void main() {
+        vWorldPosition = (modelMatrix * vec4(position, 1.0)).xyz;
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+      }
+    `,
+    fragmentShader: `
+      uniform vec3 topColor;
+      uniform vec3 bottomColor;
+      varying vec3 vWorldPosition;
+      void main() {
+        float h = clamp(normalize(vWorldPosition).y, 0.0, 1.0);
+        gl_FragColor = vec4(mix(bottomColor, topColor, pow(h, 0.6)), 1.0);
+      }
+    `,
+    side: THREE.BackSide,
+    fog: false,
+    depthWrite: false
+  })
+);
+skyDome.renderOrder = -1;
+scene.add(skyDome);
 
 // ---------- Block-break particles ----------
 const particleGeo = new THREE.BoxGeometry(0.15, 0.15, 0.15);
@@ -898,21 +938,26 @@ const SKIN_TONE = 0xe0ac69;
 // - legs, wings, snout, horns - the same way Minecraft's own mobs are
 // assembled, instead of the old flat body+head pair. userData.limbs lists
 // {mesh, phase} pairs the walk-cycle animator swings in sync.
-function buildHumanoid(bodyColor, headColor) {
+// pantsColor/skinColor default to shirtColor/headColor when omitted, so every
+// existing call site (mobs only ever passed 2 colors) keeps its original
+// single-tone look with no changes needed there.
+function buildHumanoid(shirtColor, headColor, pantsColor, skinColor) {
   const group = new THREE.Group();
-  const bodyMat = new THREE.MeshLambertMaterial({ color: bodyColor });
+  const shirtMat = new THREE.MeshLambertMaterial({ color: shirtColor });
   const headMat = new THREE.MeshLambertMaterial({ color: headColor });
+  const pantsMat = pantsColor != null ? new THREE.MeshLambertMaterial({ color: pantsColor }) : shirtMat;
+  const skinMat = skinColor != null ? new THREE.MeshLambertMaterial({ color: skinColor }) : headMat;
 
   const head = new THREE.Mesh(new THREE.BoxGeometry(0.45, 0.45, 0.45), headMat);
   head.position.y = 1.475;
-  const torso = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.65, 0.3), bodyMat);
+  const torso = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.65, 0.3), shirtMat);
   torso.position.y = 0.925;
   const legGeo = new THREE.BoxGeometry(0.22, 0.65, 0.25);
-  const legL = new THREE.Mesh(legGeo, bodyMat); legL.position.set(-0.13, 0.325, 0);
-  const legR = new THREE.Mesh(legGeo, bodyMat); legR.position.set(0.13, 0.325, 0);
+  const legL = new THREE.Mesh(legGeo, pantsMat); legL.position.set(-0.13, 0.325, 0);
+  const legR = new THREE.Mesh(legGeo, pantsMat); legR.position.set(0.13, 0.325, 0);
   const armGeo = new THREE.BoxGeometry(0.2, 0.65, 0.2);
-  const armL = new THREE.Mesh(armGeo, headMat); armL.position.set(-0.35, 0.925, 0);
-  const armR = new THREE.Mesh(armGeo, headMat); armR.position.set(0.35, 0.925, 0);
+  const armL = new THREE.Mesh(armGeo, skinMat); armL.position.set(-0.35, 0.925, 0);
+  const armR = new THREE.Mesh(armGeo, skinMat); armR.position.set(0.35, 0.925, 0);
 
   [head, torso, legL, legR, armL, armR].forEach((m) => { m.castShadow = true; group.add(m); });
   group.userData.limbs = [
@@ -1041,8 +1086,8 @@ function buildSpiderModel(bodyColor, headColor) {
   return group;
 }
 
-function makePlayerMesh(color) {
-  const group = buildHumanoid(color, SKIN_TONE);
+function makePlayerMesh(color, pantsColor, skinColor) {
+  const group = buildHumanoid(color, skinColor || SKIN_TONE, pantsColor, skinColor);
   scene.add(group);
   return group;
 }
@@ -1089,10 +1134,11 @@ function animateLimbs(group, moving) {
   }
 }
 
+function avatarKeyFor(p) { return p.color + ',' + p.pantsColor + ',' + p.skinColor; }
 function addRemotePlayer(id, p) {
-  const mesh = makePlayerMesh(p.color);
+  const mesh = makePlayerMesh(p.color, p.pantsColor, p.skinColor);
   mesh.position.set(p.x, p.y, p.z);
-  remotePlayers.set(id, { mesh, target: { x: p.x, y: p.y, z: p.z, ry: p.ry || 0 } });
+  remotePlayers.set(id, { mesh, target: { x: p.x, y: p.y, z: p.z, ry: p.ry || 0 }, avatarKey: avatarKeyFor(p) });
 }
 function removeRemotePlayer(id) {
   const rp = remotePlayers.get(id);
@@ -1282,6 +1328,19 @@ socket.on('tick', (data) => {
     }
     let rp = remotePlayers.get(id);
     if (!rp) { addRemotePlayer(id, p); rp = remotePlayers.get(id); }
+    // A player often does not settle on their avatar colors until after
+    // they have already been broadcast to everyone else as freshly joined
+    // (picking happens on the pre-game screen, a moment after connecting) -
+    // rebuild their mesh in place if the colors it was built with are stale.
+    const key = avatarKeyFor(p);
+    if (rp.avatarKey !== key) {
+      scene.remove(rp.mesh);
+      const mesh = makePlayerMesh(p.color, p.pantsColor, p.skinColor);
+      mesh.position.copy(rp.mesh.position);
+      mesh.rotation.copy(rp.mesh.rotation);
+      rp.mesh = mesh;
+      rp.avatarKey = key;
+    }
     rp.target = { x: p.x, y: p.y, z: p.z, ry: p.ry };
   }
   const activeIds = new Set(Object.keys(data.entities));
@@ -1294,6 +1353,47 @@ socket.on('tick', (data) => {
   dayClock = data.dayClock;
   isRaining = !!data.isRaining;
 });
+
+// ---------- Avatar picker ----------
+// Shown once, on the pre-game start screen. Swatch clicks are stopped from
+// bubbling up to the instructions-screen click-to-start handler so picking a
+// color does not immediately launch the game before the player is done
+// choosing. Defaults are pre-selected so the existing no-mouse flow (press
+// any move key to start) still works with zero friction for a keyboard-only
+// player who never touches the picker at all.
+const SKIN_TONES = [0xffdbb0, 0xe0ac69, 0xc68642, 0x8d5524, 0x5c3a21];
+const SHIRT_COLORS = [0xff5555, 0x5588ff, 0xffaa00, 0x55ff88, 0xcc55ff, 0x55ffff, 0xf0f0f0, 0x333333];
+const PANTS_COLORS = [0x3a3a4a, 0x5a3d2b, 0x2f2f2f, 0x4a6741, 0x6b4a8a, 0x8a3a3a, 0xc9c9c9, 0x1a1a2a];
+const selectedAvatar = { skin: SKIN_TONES[1], shirt: SHIRT_COLORS[0], pants: PANTS_COLORS[0] };
+function hex(v) { return '#' + v.toString(16).padStart(6, '0'); }
+function renderAvatarSwatches(containerId, palette, key) {
+  const el = document.getElementById(containerId);
+  el.innerHTML = '';
+  palette.forEach((color) => {
+    const btn = document.createElement('button');
+    btn.className = 'avatar-swatch' + (color === selectedAvatar[key] ? ' selected' : '');
+    btn.style.background = hex(color);
+    btn.type = 'button';
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      selectedAvatar[key] = color;
+      renderAvatarSwatches(containerId, palette, key);
+      updateAvatarPreview();
+    });
+    el.appendChild(btn);
+  });
+}
+function updateAvatarPreview() {
+  document.getElementById('prev-head').style.background = hex(selectedAvatar.skin);
+  document.getElementById('prev-torso').style.background = hex(selectedAvatar.shirt);
+  document.getElementById('prev-leg-l').style.background = hex(selectedAvatar.pants);
+  document.getElementById('prev-leg-r').style.background = hex(selectedAvatar.pants);
+}
+renderAvatarSwatches('skin-swatches', SKIN_TONES, 'skin');
+renderAvatarSwatches('shirt-swatches', SHIRT_COLORS, 'shirt');
+renderAvatarSwatches('pants-swatches', PANTS_COLORS, 'pants');
+updateAvatarPreview();
+const avatarPickerEl = document.getElementById('avatar-picker');
 
 // ---------- Player controls ----------
 // Mouse-look (via Pointer Lock) is optional - arrow keys always work as a
@@ -1309,6 +1409,9 @@ function startGame() {
   if (!gameStarted) {
     gameStarted = true;
     ensureAudio();
+    socket.emit('setAvatar', { color: selectedAvatar.shirt, pantsColor: selectedAvatar.pants, skinColor: selectedAvatar.skin });
+    armMat.color.setHex(selectedAvatar.skin);
+    avatarPickerEl.style.display = 'none'; // chosen once - do not show it again on later pause screens
   }
   instructions.style.display = 'none';
   try { controls.lock(); } catch (e) { /* no mouse available - keyboard controls still work */ }
@@ -2982,6 +3085,7 @@ function animate() {
   else brightness = 1;
 
   const sky = DAY_SKY.clone().lerp(NIGHT_SKY, 1 - brightness);
+  const zenith = DAY_ZENITH.clone().lerp(NIGHT_ZENITH, 1 - brightness);
   const eyeEntry = blockAt.get(bkey(Math.round(camera.position.x), Math.round(camera.position.y), Math.round(camera.position.z)));
   const eyeInWater = !!(eyeEntry && eyeEntry.material === 'water');
   if (eyeInWater) {
@@ -2989,11 +3093,16 @@ function animate() {
     scene.fog.color = UNDERWATER_TINT;
     scene.fog.near = 2;
     scene.fog.far = 30;
+    skyDome.visible = false;
   } else {
     scene.background = sky;
     scene.fog.color = sky;
     scene.fog.near = 50;
     scene.fog.far = 110;
+    skyDome.visible = true;
+    skyDome.position.copy(camera.position);
+    skyDome.material.uniforms.topColor.value.copy(zenith);
+    skyDome.material.uniforms.bottomColor.value.copy(sky);
   }
   // Sun stays clearly dominant over the ambient hemisphere light (roughly a
   // 4:1 ratio at full day) so shadowed ground actually reads darker than lit

@@ -169,7 +169,7 @@ io.on('connection', (socket) => {
   const spawn = randomSpawn();
   players[socket.id] = {
     x: spawn.x, y: spawn.y, z: spawn.z, ry: 0,
-    color: COLORS[colorIdx++ % COLORS.length],
+    color: COLORS[colorIdx++ % COLORS.length], pantsColor: 0x3a3a4a, skinColor: 0xe0ac69,
     health: 20, hunger: 20, dim: 'overworld', bedSpawn: null, armor: null
   };
 
@@ -275,6 +275,19 @@ io.on('connection', (socket) => {
     const p = players[socket.id];
     if (!p) return;
     p.armor = armor;
+  });
+
+  // Chosen once on the pre-game avatar screen. Validated as plain in-range
+  // hex numbers since these values ride the same players dict broadcast to
+  // every other client every tick - garbage here would break rendering for
+  // everyone, not just the sender.
+  socket.on('setAvatar', ({ color, pantsColor, skinColor }) => {
+    const p = players[socket.id];
+    if (!p) return;
+    const isHexColor = (v) => typeof v === 'number' && Number.isInteger(v) && v >= 0 && v <= 0xffffff;
+    if (isHexColor(color)) p.color = color;
+    if (isHexColor(pantsColor)) p.pantsColor = pantsColor;
+    if (isHexColor(skinColor)) p.skinColor = skinColor;
   });
 
   socket.on('chat', ({ text }) => {
