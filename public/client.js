@@ -1604,7 +1604,15 @@ const RECIPES = [
 let craftMenuOpen = false;
 let craftSelectedIndex = 0;
 const craftMenuEl = document.getElementById('craft-menu');
-const recipeListEl = document.getElementById('recipe-list');
+const craftGridEl = document.getElementById('craft-grid');
+const craftOutputEl = document.getElementById('craft-output-slot');
+const craftOutputNameEl = document.getElementById('craft-output-name');
+const craftMakeBtnEl = document.getElementById('craft-make-btn');
+const craftWhyEl = document.getElementById('craft-why');
+const craftRecipesEl = document.getElementById('craft-recipes');
+const craftArmorLabelEl = document.getElementById('craft-armor-label');
+const CRAFT_GRID_COLS = 8;
+const ARMOR_TIER_COLOR = { wool: 0xf0ede4, gold: 0xffd700, iron: 0xd8d8d8, diamond: 0x5eead4 };
 
 function canAfford(recipe) {
   if (recipe.needsTable !== false && !findNearbyBlockOfType('crafting_table', 4)) return false;
@@ -1675,17 +1683,85 @@ function craftRecipe(recipe) {
   unlockAchievement('first_craft', 'Crafter');
 }
 
-function renderCraftMenu() {
-  recipeListEl.innerHTML = '';
+// The output slot represents whatever the recipe actually produces (give),
+// or - for tool/armor recipes, which have no "item" of their own - falls
+// back to the recipe's primary ingredient so an iron pickaxe at least shows
+// an iron-colored icon rather than nothing.
+function craftOutputKeyFor(recipe) {
+  if (recipe.give) return Object.keys(recipe.give)[0];
+  return Object.keys(recipe.cost)[0];
+}
+function renderCraftIngredients(recipe) {
+  craftGridEl.innerHTML = '';
+  const mats = Object.keys(recipe.cost);
+  for (let i = 0; i < 9; i++) {
+    const cell = document.createElement('div');
+    const mat = mats[i];
+    if (mat) {
+      const have = inventory[mat] || 0;
+      const need = recipe.cost[mat];
+      cell.className = 'craft-ingredient';
+      cell.title = itemNameFor(mat) + ' - have ' + have;
+      cell.innerHTML = `<span class="swatch" style="${swatchStyle(mat)}"></span><span class="amt${have < need ? ' short' : ''}">${need}</span>`;
+    } else {
+      cell.className = 'craft-ingredient empty';
+    }
+    craftGridEl.appendChild(cell);
+  }
+}
+function renderCraftOutput(recipe) {
+  craftOutputEl.innerHTML = `<span class="swatch" style="${swatchStyle(craftOutputKeyFor(recipe))}"></span>`;
+  craftOutputNameEl.textContent = recipe.name.split(' (')[0];
+}
+// Armor here is one unified tier rather than four separate Minecraft-style
+// pieces, but the paperdoll still shows all four slots (helmet/chest/legs/
+// boots) lit up together in the tier color - reads the same at a glance
+// without pretending the game tracks per-piece armor it does not.
+function renderArmorSlots() {
+  const tier = inventory.tools.armor;
+  const color = tier ? ARMOR_TIER_COLOR[tier] : null;
+  ['head', 'chest', 'legs', 'feet'].forEach((slot) => {
+    const el = document.getElementById('armor-slot-' + slot);
+    if (color != null) {
+      el.classList.add('equipped');
+      el.style.background = hex(color);
+    } else {
+      el.classList.remove('equipped');
+      el.style.background = '';
+    }
+  });
+  craftArmorLabelEl.textContent = tier ? (tier[0].toUpperCase() + tier.slice(1) + ' Armor equipped') : 'No armor equipped';
+}
+function renderCraftAvatarPreview() {
+  document.getElementById('craft-prev-head').style.background = hex(selectedAvatar.skin);
+  document.getElementById('craft-prev-torso').style.background = hex(selectedAvatar.shirt);
+  document.getElementById('craft-prev-leg-l').style.background = hex(selectedAvatar.pants);
+  document.getElementById('craft-prev-leg-r').style.background = hex(selectedAvatar.pants);
+}
+function renderRecipeGrid() {
+  craftRecipesEl.innerHTML = '';
   RECIPES.forEach((r, i) => {
-    const row = document.createElement('div');
-    row.className = 'recipe' + (i === craftSelectedIndex ? ' selected' : '');
-    row.style.opacity = canAfford(r) ? '1' : '0.4';
-    row.innerHTML = `<span class="name">${r.name}</span>`;
-    row.addEventListener('click', () => craftRecipe(r));
-    recipeListEl.appendChild(row);
+    const cell = document.createElement('div');
+    cell.className = 'recipe-cell' + (i === craftSelectedIndex ? ' selected' : '') + (canAfford(r) ? '' : ' unaffordable');
+    cell.title = r.name;
+    cell.innerHTML = `<span class="swatch" style="${swatchStyle(craftOutputKeyFor(r))}"></span><span class="r-name">${r.name.split(' (')[0]}</span>`;
+    cell.addEventListener('click', () => { craftSelectedIndex = i; renderCraftMenu(); });
+    craftRecipesEl.appendChild(cell);
   });
 }
+function renderCraftMenu() {
+  const recipe = RECIPES[craftSelectedIndex];
+  renderCraftIngredients(recipe);
+  renderCraftOutput(recipe);
+  renderArmorSlots();
+  renderCraftAvatarPreview();
+  renderRecipeGrid();
+  const affordable = canAfford(recipe);
+  craftMakeBtnEl.disabled = !affordable;
+  craftWhyEl.textContent = affordable ? '' : whyCantAfford(recipe);
+}
+craftMakeBtnEl.addEventListener('click', () => craftRecipe(RECIPES[craftSelectedIndex]));
+craftOutputEl.addEventListener('click', () => craftRecipe(RECIPES[craftSelectedIndex]));
 
 function toggleCraftMenu() {
   craftMenuOpen = !craftMenuOpen;
@@ -1997,8 +2073,10 @@ document.addEventListener('keydown', (e) => {
     return; // let the browser handle normal text-input typing
   }
   if (craftMenuOpen) {
-    if (e.code === 'ArrowUp') { craftSelectedIndex = (craftSelectedIndex - 1 + RECIPES.length) % RECIPES.length; renderCraftMenu(); }
-    else if (e.code === 'ArrowDown') { craftSelectedIndex = (craftSelectedIndex + 1) % RECIPES.length; renderCraftMenu(); }
+    if (e.code === 'ArrowUp') { craftSelectedIndex = (craftSelectedIndex - CRAFT_GRID_COLS + RECIPES.length) % RECIPES.length; renderCraftMenu(); }
+    else if (e.code === 'ArrowDown') { craftSelectedIndex = (craftSelectedIndex + CRAFT_GRID_COLS) % RECIPES.length; renderCraftMenu(); }
+    else if (e.code === 'ArrowLeft') { craftSelectedIndex = (craftSelectedIndex - 1 + RECIPES.length) % RECIPES.length; renderCraftMenu(); }
+    else if (e.code === 'ArrowRight') { craftSelectedIndex = (craftSelectedIndex + 1) % RECIPES.length; renderCraftMenu(); }
     else if (e.code === 'Enter') { craftRecipe(RECIPES[craftSelectedIndex]); }
     else if (e.code === 'KeyE' || e.code === 'Escape') { toggleCraftMenu(); }
     return;
