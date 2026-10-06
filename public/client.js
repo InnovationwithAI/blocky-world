@@ -60,14 +60,30 @@ const sfx = {
 // ---------- Scene setup ----------
 const scene = new THREE.Scene();
 const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
-const renderer = new THREE.WebGLRenderer({ antialias: true });
+// Touch (iPad) detection. ?touch=1 / ?touch=0 force it on/off so the touch
+// controls can be tried on a desktop browser. iPadOS reports 5 touch points
+// and a coarse primary pointer; a laptop with a mouse reports neither.
+const IS_TOUCH = (() => {
+  const q = new URLSearchParams(location.search).get('touch');
+  if (q === '1') return true;
+  if (q === '0') return false;
+  return navigator.maxTouchPoints > 1 && window.matchMedia('(pointer: coarse)').matches;
+})();
+if (IS_TOUCH) document.body.classList.add('touch');
+// Time of the last touch-layer press, so the synthetic mouse events a tablet
+// fires after a tap are not mistaken for a real click (see mousedown below).
+let lastTouchTime = 0;
+
+const renderer = new THREE.WebGLRenderer({ antialias: !IS_TOUCH });
 // Without this, three.js renders at 1 device pixel per CSS pixel regardless
 // of the display - on any Retina/HiDPI screen (which is most laptops and
 // tablets today) that means the whole game is upscaled from a lower-res
 // buffer and reads as soft/blurry no matter how good the textures are.
 // Capped at 2x since going higher costs a lot of fill rate for a difference
 // nobody can see.
-renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+// An iPad's Retina screen is huge (2048x1536 and up), and this scene also
+// runs soft shadows and bloom, so touch devices render at a lower cap.
+renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, IS_TOUCH ? 1.25 : 2));
 renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.outputEncoding = THREE.sRGBEncoding;
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
@@ -88,7 +104,7 @@ const hemiLight = new THREE.HemisphereLight(0xbfe3ff, 0x3a2f28, 1.0);
 scene.add(hemiLight);
 const sunLight = new THREE.DirectionalLight(0xfff1d6, 1.0);
 sunLight.castShadow = true;
-sunLight.shadow.mapSize.set(1536, 1536);
+sunLight.shadow.mapSize.set(IS_TOUCH ? 1024 : 1536, IS_TOUCH ? 1024 : 1536);
 sunLight.shadow.camera.near = 1;
 sunLight.shadow.camera.far = 150;
 sunLight.shadow.camera.left = -40;
@@ -1418,7 +1434,8 @@ function startGame() {
 }
 instructions.addEventListener('click', startGame);
 controls.addEventListener('unlock', () => {
-  if (!craftMenuOpen && !invScreenOpen) instructions.style.display = 'flex';
+  // Touch has no pointer lock, so there is no "released the mouse" pause screen to show.
+  if (!IS_TOUCH && !craftMenuOpen && !invScreenOpen) instructions.style.display = 'flex';
 });
 
 const move = { forward: false, back: false, left: false, right: false, up: false, down: false };
@@ -2419,6 +2436,7 @@ function placeFluidCell(x, y, z, material) {
 }
 
 document.addEventListener('mousedown', (e) => {
+  if (performance.now() - lastTouchTime < 800) return; // compat mouse event after a touch tap
   if (!gameStarted || craftMenuOpen || invScreenOpen || chatOpen || spectatorMode || gameOver) return;
   if (e.button === 0) minePressed = true;
   else if (e.button === 2) placeBlock();
@@ -3225,7 +3243,9 @@ function animate() {
 
 // periodic position broadcast
 setInterval(() => {
-  if (!controls.isLocked) return;
+  // Touch devices have no pointer lock at all, so isLocked is never true
+  // there - without this the server would never learn where an iPad player is.
+  if (!controls.isLocked && !(IS_TOUCH && gameStarted)) return;
   socket.emit('move', {
     x: camera.position.x, y: camera.position.y, z: camera.position.z, ry: camera.rotation.y
   });

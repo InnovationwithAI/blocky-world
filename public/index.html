@@ -2,6 +2,10 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <title>Blocky World - Multiplayer</title>
 <style>
   html, body { margin: 0; height: 100%; overflow: hidden; background: #7ec0ee; font-family: sans-serif; user-select: none; }
@@ -223,6 +227,76 @@
   }
   #pocket-craft-output .swatch { width: 18px; height: 18px; border-radius: 3px; }
   #pocket-craft-label { font-size: 10px; opacity: 0.8; text-align: center; min-height: 24px; }
+
+  /* ---------- Menu close buttons (also handy with a mouse) ---------- */
+  .menu-close {
+    position: absolute; top: 8px; right: 8px; width: 34px; height: 34px; border-radius: 50%;
+    border: 1px solid rgba(255,255,255,0.35); background: rgba(255,255,255,0.12); color: white;
+    font-size: 16px; line-height: 1; cursor: pointer; z-index: 2;
+  }
+  #craft-panel, #inv-screen { position: relative; }
+  #inv-screen { position: fixed; }
+
+  /* ---------- Touch (iPad) ---------- */
+  body.touch {
+    touch-action: none; overscroll-behavior: none; -webkit-touch-callout: none;
+    -webkit-user-select: none; -webkit-tap-highlight-color: transparent;
+    position: fixed; width: 100%;
+  }
+  body.touch #hint { display: none; }
+  body.touch #hotbar { pointer-events: auto; bottom: calc(10px + env(safe-area-inset-bottom)); }
+  body.touch .slot { width: 64px; height: 64px; }
+  body.touch #stats { top: calc(10px + env(safe-area-inset-top)); left: calc(10px + env(safe-area-inset-left)); }
+  body.touch #players-online { top: calc(10px + env(safe-area-inset-top)); right: calc(10px + env(safe-area-inset-right)); }
+  body.touch #chat-log { top: 120px; bottom: auto; left: calc(10px + env(safe-area-inset-left)); }
+  body.touch #chat-input { top: 110px; bottom: auto; left: 50%; transform: translateX(-50%); width: 60vw; max-width: 60vw; font-size: 16px; }
+  body.touch #craft-recipes, body.touch #inv-grid { touch-action: pan-y; -webkit-overflow-scrolling: touch; }
+  body.touch .recipe-cell { min-height: 66px; }
+  body.touch .recipe-cell .r-name { font-size: 10px; }
+  body.touch .inv-cell .inv-name { font-size: 10px; }
+  body.touch .menu-close { width: 44px; height: 44px; font-size: 20px; }
+  body.touch #craft-make-btn { padding: 10px 34px; font-size: 16px; }
+  body.touch .avatar-swatch { width: 34px; height: 34px; }
+  #touch-ui { position: fixed; inset: 0; z-index: 15; pointer-events: none; }
+  #touch-ui > * { pointer-events: auto; touch-action: none; }
+  #joy-zone {
+    position: absolute; left: 0; bottom: 0; width: 42%; height: 58%;
+    padding-left: env(safe-area-inset-left);
+  }
+  #joy-base, #joy-knob { position: absolute; border-radius: 50%; pointer-events: none; }
+  #joy-base {
+    width: 130px; height: 130px; left: 40px; bottom: 56px;
+    background: rgba(255,255,255,0.10); border: 2px solid rgba(255,255,255,0.35);
+  }
+  #joy-knob {
+    width: 58px; height: 58px; background: rgba(255,255,255,0.35); border: 2px solid rgba(255,255,255,0.7);
+    left: 76px; bottom: 92px;
+  }
+  .tbtn {
+    position: absolute; display: flex; align-items: center; justify-content: center;
+    border-radius: 50%; background: rgba(255,255,255,0.16); border: 2px solid rgba(255,255,255,0.45);
+    color: white; font: bold 13px sans-serif; text-align: center; line-height: 1.1;
+    -webkit-user-select: none; user-select: none; touch-action: none;
+  }
+  .tbtn.down { background: rgba(255,255,255,0.45); }
+  .tbtn small { display: block; font-size: 10px; font-weight: normal; opacity: 0.85; }
+  #touch-actions { position: absolute; right: calc(16px + env(safe-area-inset-right)); bottom: calc(86px + env(safe-area-inset-bottom)); width: 210px; height: 200px; pointer-events: none; }
+  #touch-actions .tbtn { pointer-events: auto; }
+  #tb-jump { right: 0; bottom: 0; width: 88px; height: 88px; font-size: 26px; }
+  #tb-mine { right: 100px; bottom: 6px; width: 80px; height: 80px; font-size: 24px; }
+  #tb-place { right: 4px; bottom: 100px; width: 80px; height: 80px; font-size: 24px; }
+  #touch-util {
+    position: absolute; right: calc(10px + env(safe-area-inset-right)); top: 130px;
+    display: flex; flex-direction: column; gap: 8px; pointer-events: none;
+  }
+  #touch-util .tbtn { position: static; width: 52px; height: 52px; pointer-events: auto; }
+  #touch-more {
+    position: absolute; right: calc(76px + env(safe-area-inset-right)); top: 130px; display: none;
+    grid-template-columns: repeat(4, 62px); gap: 8px; padding: 10px; border-radius: 12px;
+    background: rgba(15,15,15,0.85); border: 1px solid rgba(255,255,255,0.3);
+  }
+  #touch-more.open { display: grid; }
+  #touch-more .tbtn { position: static; width: 62px; height: 62px; border-radius: 10px; font-size: 11px; }
 </style>
 </head>
 <body>
@@ -231,6 +305,7 @@
 <div id="toast-container"></div>
 <div id="craft-menu">
   <div id="craft-panel">
+    <button class="menu-close" id="craft-close" type="button">&#10005;</button>
     <h2>Crafting Table</h2>
     <div id="craft-body">
       <div id="craft-player-col">
@@ -266,6 +341,7 @@
   </div>
 </div>
 <div id="inv-screen">
+  <button class="menu-close" id="inv-close" type="button">&#10005;</button>
   <div id="inv-left">
     <h2>Inventory</h2>
     <input id="inv-search" type="text" placeholder="Search..." autocomplete="off">
@@ -330,5 +406,6 @@
 <script src="/socket.io/socket.io.js"></script>
 <script src="/shared/world.js"></script>
 <script src="/client.js"></script>
+<script src="/touch.js"></script>
 </body>
 </html>
